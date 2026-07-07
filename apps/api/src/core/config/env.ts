@@ -5,9 +5,9 @@
  * the codebase allowed to read it (doc 03 §12 — enforced by lint/CI later).
  * Everything downstream imports the typed, frozen `config` object instead.
  *
- * Phase 0 scope: core runtime + Redis. Vendor groups (Supabase, Exotel,
- * Deepgram, Anthropic, ElevenLabs, Google) join this schema in their phases —
- * each as required-in-production, optional-in-development where sensible.
+ * Phase 0 scope: core runtime + Redis. Vendor groups (Supabase, Bolna,
+ * Anthropic, Google) join this schema in their phases — each as
+ * required-in-production, optional-in-development where sensible.
  */
 import { z } from "zod";
 
@@ -34,7 +34,7 @@ function loadEnv(): Env {
   const result = EnvSchema.safeParse(process.env);
   if (!result.success) {
     // Fail fast and LOUD: list every problem, then refuse to start.
-    // A half-configured voice server must never answer a call (doc 09 §2).
+    // A half-configured server must never serve a live call's webhooks (doc 09 §2).
     console.error("❌ Invalid environment configuration:\n");
     for (const issue of result.error.issues) {
       console.error(`  • ${issue.path.join(".") || "(root)"}: ${issue.message}`);

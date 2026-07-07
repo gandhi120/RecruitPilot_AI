@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RecruitPilot AI — The Ride</title>
+<style>
+  :root {
+    --bg: #060B14;
+    --panel: rgba(14,24,38,.92);
+    --line: #1B3048;
+    --cyan: #5FD4F4;
+    --cyan-dim: #2A7FA0;
+    --gold: #E8B34B;
+    --green: #3DDC84;
+    --ink: #DCE8F5;
+    --muted: #8A9BB0;
+    --faint: #5A6C82;
+    --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    --sans: "Avenir Next", "Segoe UI", -apple-system, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
+  /* the scroll track — its height is the length of the ride */
+  #track { height: 1300vh; }
+  #scene { position: fixed; inset: 0; z-index: 0; display: block; }
+
+  /* ===== LOADER ===== */
+  #loader {
+    position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px;
+    background: var(--bg); transition: opacity .6s ease;
+  }
+  #loader.hide { opacity: 0; pointer-events: none; }
+  #loader .l-brand { font-family: var(--mono); font-size: 11px; letter-spacing: .34em; color: var(--cyan); }
+  #loader .l-bar { width: min(320px, 70vw); height: 2px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  #loader .l-bar i { display: block; height: 100%; width: 0%; background: var(--cyan); box-shadow: 0 0 12px var(--cyan); transition: width .1s linear; }
+  #loader .l-pct { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .2em; font-variant-numeric: tabular-nums; }
+
+  /* ===== HUD ===== */
+  #hud-top {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px; font-family: var(--mono); font-size: 10.5px; letter-spacing: .22em;
+    background: linear-gradient(180deg, rgba(6,11,20,.85), transparent);
+    pointer-events: none;
+  }
+  #hud-top .brand { color: var(--cyan); font-weight: 600; }
+  #hud-top a {
+    pointer-events: auto; color: var(--muted); text-decoration: none;
+    border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px;
+    background: rgba(6,11,20,.6); transition: color .15s, border-color .15s;
+  }
+  #hud-top a:hover, #hud-top a:focus-visible { color: var(--cyan); border-color: var(--cyan); outline: none; }
+
+  #hud-bottom {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    padding: 14px 22px 18px;
+    background: linear-gradient(0deg, rgba(6,11,20,.9), transparent);
+    pointer-events: none;
+  }
+  .roadmap { position: relative; height: 22px; max-width: 860px; margin: 0 auto; }
+  .roadmap .rail { position: absolute; left: 0; right: 0; top: 10px; height: 2px; background: var(--line); border-radius: 2px; }
+  .roadmap .fill { position: absolute; left: 0; top: 10px; height: 2px; width: 0%; background: var(--cyan); box-shadow: 0 0 10px var(--cyan); border-radius: 2px; }
+  .roadmap .stop {
+    position: absolute; top: 5px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%;
+    background: var(--bg); border: 2px solid var(--faint); transition: border-color .3s, box-shadow .3s;
+  }
+  .roadmap .stop.lit { border-color: var(--cyan); box-shadow: 0 0 10px rgba(95,212,244,.8); }
+  .roadmap .stop.done-st { border-color: var(--green); }
+  .roadmap .stop span {
+    position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+    font-family: var(--mono); font-size: 8px; letter-spacing: .1em; color: var(--faint); white-space: nowrap;
+  }
+  .hud-row { display: flex; align-items: center; justify-content: space-between; max-width: 860px; margin: 8px auto 0; font-family: var(--mono); font-size: 9.5px; letter-spacing: .18em; color: var(--faint); }
+  #speed { color: var(--cyan); font-variant-numeric: tabular-nums; }
+
+  #scroll-cue {
+    position: fixed; bottom: 76px; left: 50%; transform: translateX(-50%); z-index: 20;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .3em; color: var(--gold);
+    text-align: center; transition: opacity .5s ease; pointer-events: none;
+  }
+  #scroll-cue .arr { display: block; font-size: 18px; margin-top: 6px; animation: cuebounce 1.4s ease-in-out infinite; }
+  @keyframes cuebounce { 50% { transform: translateY(7px); } }
+  #scroll-cue.hide { opacity: 0; }
+
+  /* ===== CHAPTER CARDS ===== */
+  .chapter {
+    position: fixed; z-index: 15; max-width: 400px;
+    top: 50%; transform: translateY(-50%) translateX(0);
+    opacity: 0; visibility: hidden; pointer-events: none;
+    transition: opacity .45s ease, transform .45s ease, visibility .45s;
+  }
+  .chapter.left { left: 5vw; }
+  .chapter.right { right: 5vw; }
+  .chapter.center { left: 50%; max-width: 640px; width: 90vw; transform: translate(-50%, -50%); text-align: center; }
+  .chapter.on { opacity: 1; visibility: visible; pointer-events: auto; }
+  .chapter.left:not(.on) { transform: translateY(-50%) translateX(-24px); }
+  .chapter.right:not(.on) { transform: translateY(-50%) translateX(24px); }
+  .chapter.center:not(.on) { transform: translate(-50%, -46%); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px 22px; position: relative; text-align: left;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+    max-height: 62vh; overflow-y: auto;
+  }
+  .card::before {
+    content: ""; position: absolute; inset: -1px auto auto -1px; width: 20px; height: 20px;
+    border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan); border-top-left-radius: 12px;
+  }
+  .card .eye { font-family: var(--mono); font-size: 9.5px; letter-spacing: .26em; color: var(--cyan); text-transform: uppercase; }
+  .card h3 { margin: 6px 0 8px; font-size: 19px; font-weight: 600; letter-spacing: .04em; }
+  .card p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); line-height: 1.55; }
+  .card p:last-child { margin-bottom: 0; }
+  .card p b, .card li b { color: var(--ink); }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 12px; }
+  .chip { font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; border-radius: 999px; padding: 3px 10px; border: 1px solid; white-space: nowrap; }
+  .chip.done { color: var(--green); border-color: rgba(61,220,132,.5); background: rgba(61,220,132,.08); }
+  .chip.active { color: var(--cyan); border-color: rgba(95,212,244,.5); background: rgba(95,212,244,.08); }
+  .chip.locked { color: var(--muted); border-color: var(--line); }
+  .chip.gold { color: var(--gold); border-color: rgba(232,179,75,.5); background: rgba(232,179,75,.07); }
+  .ms { list-style: none; margin: 6px 0 0; padding: 0; }
+  .ms li { display: flex; gap: 10px; padding: 8px 0; border-top: 1px dashed rgba(27,48,72,.9); font-size: 12.5px; color: var(--muted); }
+  .ms li:first-child { border-top: none; }
+  .ms .mk { flex: 0 0 20px; height: 20px; border-radius: 50%; font-family: var(--mono); font-size: 11px; display: flex; align-items: center; justify-content: center; }
+  .ms .mk.d { color: var(--green); border: 1px solid rgba(61,220,132,.5); background: rgba(61,220,132,.12); }
+  .ms .mk.a { color: var(--cyan); border: 1px solid rgba(95,212,244,.5); background: rgba(95,212,244,.1); }
+  .ms .mk.l { color: var(--faint); border: 1px dashed var(--faint); }
+  .ms .ev { font-family: var(--mono); font-size: 10.5px; color: var(--green); }
+  blockquote.greet {
+    margin: 10px 0 0; padding: 12px 14px; border-left: 3px solid var(--gold);
+    background: rgba(232,179,75,.07); border-radius: 0 8px 8px 0; font-style: italic; font-size: 13px; color: var(--ink);
+  }
+
+  /* hero + big stats */
+  .hero-title { font-size: clamp(34px, 7vw, 74px); font-weight: 600; letter-spacing: .12em; text-transform: uppercase; margin: 0; line-height: 1.06; text-shadow: 0 0 34px rgba(95,212,244,.4); text-wrap: balance; }
+  .hero-sub { font-family: var(--mono); font-size: clamp(10px, 1.6vw, 13px); letter-spacing: .3em; color: var(--gold); margin-top: 16px; }
+  .hero-p { color: var(--muted); font-size: 14.5px; max-width: 56ch; margin: 18px auto 0; }
+  .bigstat { font-family: var(--mono); font-weight: 700; font-size: clamp(52px, 10vw, 110px); color: var(--cyan); text-shadow: 0 0 40px rgba(95,212,244,.55); line-height: 1; font-variant-numeric: tabular-nums; }
+  .bigstat-cap { font-family: var(--mono); font-size: 11px; letter-spacing: .3em; color: var(--muted); margin-top: 12px; }
+  .cta {
+    display: inline-block; margin-top: 18px; pointer-events: auto;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .2em; text-decoration: none;
+    color: var(--bg); background: var(--cyan); border-radius: 999px; padding: 12px 26px; font-weight: 700;
+    box-shadow: 0 0 24px rgba(95,212,244,.5);
+  }
+  .cta:hover { box-shadow: 0 0 34px rgba(95,212,244,.7); }
+  .cta.ghost { color: var(--cyan); background: transparent; border: 1px solid var(--cyan); box-shadow: none; margin-left: 10px; }
+  .warn { display: flex; gap: 10px; text-align: left; border: 1px solid rgba(232,179,75,.45); border-left: 3px solid var(--gold); background: rgba(232,179,75,.06); border-radius: 8px; padding: 10px 14px; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+  .warn b { color: var(--gold); }
+
+  /* fallback */
+  #nogl { position: fixed; inset: 0; z-index: 90; display: none; align-items: center; justify-content: center; padding: 30px; text-align: center; background: var(--bg); }
+  #nogl .card { max-width: 480px; }
+
+  @media (max-width: 700px) {
+    .chapter.left, .chapter.right { left: 4vw; right: 4vw; max-width: none; top: auto; bottom: 96px; transform: none; }
+    .chapter.left:not(.on), .chapter.right:not(.on) { transform: translateY(16px); }
+    .card { max-height: 46vh; padding: 16px; }
+    .roadmap .stop span { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #scroll-cue .arr { animation: none; }
+    .chapter { transition: opacity .2s ease; }
+  }
+</style>
+</head>
+<body>
+
+<div id="track"></div>
+<canvas id="scene"></canvas>
+
+<div id="loader">
+  <div class="l-brand">◈ RECRUITPILOT AI — THE RIDE</div>
+  <div class="l-bar"><i id="l-fill"></i></div>
+  <div class="l-pct" id="l-pct">0%</div>
+</div>
+
+<div id="nogl"><div class="card">
+  <span class="eye">3D NOT AVAILABLE</span>
+  <h3>Your browser can't run WebGL</h3>
+  <p>No problem — the full project status lives on the Mission Control dashboard.</p>
+  <a class="cta" href="progress-dashboard.html">OPEN MISSION CONTROL ▸</a>
+</div></div>
+
+<div id="hud-top">
+  <span class="brand">◈ RECRUITPILOT AI — THE RIDE</span>
+  <a href="progress-dashboard.html">MISSION CONTROL ▸</a>
+</div>
+
+<div id="scroll-cue"><span>SCROLL TO RIDE</span><span class="arr">▾</span></div>
+
+<div id="hud-bottom">
+  <div class="roadmap" id="roadmap"><div class="rail"></div><div class="fill" id="map-fill"></div></div>
+  <div class="hud-row"><span id="chap-label">START</span><span id="speed">0 KM/H</span></div>
+</div>
+
+<div id="chapters"></div>
+
+<script src="assets/three.min.js"></script>
+<script>
+/* ================== DATA (single place to update) ================== */
+const PROJECT = {
+  phases: [
+    { id: 0, name: "Foundations", status: "active",
+      goal: "An empty repo becomes a booting, tested, CI-green, containerized skeleton — the workbench everything else is built on.",
+      milestones: [
+        { t: "M0.1 — Safe, scaffolded monorepo", done: true, ev: "commit 0cd64f0" },
+        { t: "M0.2 — Fastify server that fails fast on bad config", done: true, ev: "commit 6097f70" },
+        { t: "M0.3 — Docker + CI pipeline + first test", done: false },
+      ] },
+    { id: 1, name: "Data & Dashboard", status: "locked",
+      goal: "A real database (Supabase + Prisma, row-level security) and a live dashboard Varun can log into.",
+      milestones: [
+        { t: "M1.1 — Database schema: calls, recruiters, opportunities, memory", done: false },
+        { t: "M1.2 — Next.js login + live calls list (updates without refresh)", done: false },
+      ] },
+    { id: 2, name: "Walking Skeleton", status: "locked", pivot: true,
+      goal: "THE moment of truth: a real phone call reaches our server and hears the AI greeting — the riskiest integration, proven first.",
+      milestones: [
+        { t: "M2.1 — Exotel audio stream reaches us through a token-guarded tunnel", done: false },
+        { t: "M2.2 — Dial the number → hear the greeting → call appears live", done: false },
+      ] },
+    { id: 3, name: "Full Voice Loop", status: "locked",
+      goal: "A real conversation: hear (Deepgram) → think (Claude) → speak (ElevenLabs), interruptible, under the 1.5s budget.",
+      milestones: [
+        { t: "M3.1 — Live transcription of the caller", done: false },
+        { t: "M3.2 — Streamed replies: sentence 1 plays while sentence 3 is written", done: false },
+        { t: "M3.3 — Barge-in ~300ms + measured p95 ≤ 1.5s", done: false },
+      ] },
+    { id: 4, name: "Agent Intelligence", status: "locked",
+      goal: "Screening questions, four tools (calendar, resume, save recruiter, notify), memory of returning callers, injection defense.",
+      milestones: [
+        { t: "M4.1 — The four tools work mid-call", done: false },
+        { t: "M4.2 — Screening + “welcome back” memory + defenses", done: false },
+      ] },
+    { id: 5, name: "Async Plane", status: "locked",
+      goal: "After the call: transcript, AI summary, recruiter records, recording — reliable background jobs, then Varun gets the email.",
+      milestones: [
+        { t: "M5.1 — Job chain: persist → summarize → store (idempotent)", done: false },
+        { t: "M5.2 — Notify Varun + full record viewable in the dashboard", done: false },
+      ] },
+    { id: 6, name: "Production Deploy", status: "locked",
+      goal: "Live on AWS Mumbai with a real domain, auto-deploy on merge, monitoring, alarms, and a passed security audit.",
+      milestones: [
+        { t: "M6.1 — EC2 + TLS + domain; Exotel cut over to production", done: false },
+        { t: "M6.2 — Merge-to-main deploys; security + test gates pass", done: false },
+      ] },
+    { id: 7, name: "Polish & Iterate", status: "locked",
+      goal: "Greeting & questions editable without redeploys, per-call cost visible, load-tested, vendor-swap proven.",
+      milestones: [
+        { t: "M7 — Settings editor · cost dashboard · load test · swap drill", done: false },
+      ] },
+  ],
+};
+const PIPE = [
+  { ico: "📞", name: "Recruiter calls", d: "An ordinary phone call — no app needed" },
+  { ico: "📡", name: "Exotel", d: "Answers & streams the audio to our server" },
+  { ico: "⚙️", name: "Voice Gateway", d: "Our Fastify code — the hub of the call" },
+  { ico: "👂", name: "Deepgram", d: "Speech → text, live, as the caller talks" },
+  { ico: "🧠", name: "Claude", d: "Thinks, answers, uses tools mid-call" },
+  { ico: "🗣️", name: "ElevenLabs", d: "Text → natural voice, back to the caller" },
+];
+
+const allM = PROJECT.phases.flatMap(p => p.milestones);
+const doneM = allM.filter(m => m.done).length;
+const pctVal = Math.round(doneM / allM.length * 100);
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ================== CHAPTERS (u = position along the road, 0..1) ================== */
+const STATION_U = PROJECT.phases.map((_, i) => 0.30 + i * (0.64 / 7)); // 8 stations 0.30 → 0.94
+function phaseCard(p) {
+  const dm = p.milestones.filter(m => m.done).length;
+  const stat = p.status === "active" ? '<span class="chip active">● IN PROGRESS</span>'
+    : p.status === "done" ? '<span class="chip done">✓ DONE</span>'
+    : '<span class="chip locked">○ NOT STARTED</span>';
+  const rows = p.milestones.map(m => {
+    const k = m.done ? "d" : (p.status === "active" ? "a" : "l");
+    const mark = m.done ? "✓" : (k === "a" ? "▸" : "·");
+    return `<li><span class="mk ${k}">${mark}</span><div>${m.t}${m.ev ? ` <span class="ev">· ${m.ev}</span>` : ""}</div></li>`;
+  }).join("");
+  return `<div class="card">
+    <span class="eye">STATION ${p.id + 1} OF 8 · BUILD PHASE ${String(p.id).padStart(2, "0")}</span>
+    <h3>${p.name}</h3>
+    <div class="chips">${stat}<span class="chip locked">${dm}/${p.milestones.length} MILESTONES</span>${p.pivot ? '<span class="chip gold">🎯 RISKIEST INTEGRATION</span>' : ""}</div>
+    <p>${p.goal}</p>
+    <ul class="ms">${rows}</ul>
+  </div>`;
+}
+const CHAPTERS = [
+  { u: [0.00, 0.045], side: "center", label: "START", html: `
+      <p class="hero-sub">◈ AN AI THAT ANSWERS THE PHONE ◈</p>
+      <h2 class="hero-title">RecruitPilot AI<br>The Ride</h2>
+      <p class="hero-p">Ride the road through the whole project — every part of the system, every build phase, every milestone. No prior knowledge needed.</p>` },
+  { u: [0.05, 0.115], side: "left", label: "THE MISSION", html: `
+      <div class="card">
+        <span class="eye">CHAPTER 1 · THE MISSION</span>
+        <h3>What is being built?</h3>
+        <p>A voice assistant for a <b>real phone number</b>. When a recruiter calls Varun and he's busy, the AI answers, honestly introduces itself, asks permission, and interviews the recruiter — role, company, salary, location.</p>
+        <p>Afterwards it saves a transcript + summary and notifies Varun instantly. If the recruiter calls again — it remembers them.</p>
+        <blockquote class="greet">“Hello. You've reached Varun Gandhi's AI Assistant. Varun is currently unavailable. With your permission, I can collect information regarding this opportunity and immediately notify him.”</blockquote>
+      </div>` },
+  { u: [0.12, 0.185], side: "right", label: "THE MACHINE", html: `
+      <div class="card">
+        <span class="eye">CHAPTER 2 · THE MACHINE</span>
+        <h3>Six checkpoints, one voice loop</h3>
+        <p>You're riding past the six parts of the pipeline — look at the glowing billboards. Sound flows through all six and back <b>while the caller is still talking</b>:</p>
+        <ul class="ms">${PIPE.map(b => `<li><span class="mk a">${b.ico}</span><div><b>${b.name}</b> — ${b.d}</div></li>`).join("")}</ul>
+      </div>` },
+  { u: [0.19, 0.25], side: "center", label: "THE BUDGET", html: `
+      <div class="bigstat">≤ 1.5s</div>
+      <div class="bigstat-cap">FROM THE CALLER'S LAST WORD TO THE AI'S FIRST SOUND.<br>ANY LONGER FEELS LIKE A DEAD LINE — SO EVERY STAGE MUST STREAM.</div>` },
+  ...PROJECT.phases.map((p, i) => ({
+    u: [STATION_U[i] - 0.033, STATION_U[i] + 0.033],
+    side: i % 2 ? "right" : "left",
+    label: "PHASE " + p.id,
+    html: phaseCard(p),
+  })),
+  { u: [0.965, 1.001], side: "center", label: "FINISH", html: `
+      <div class="bigstat">${pctVal}%</div>
+      <div class="bigstat-cap">${doneM} OF ${allM.length} MILESTONES COMPLETE · PHASE 0 IN PROGRESS</div>
+      <div style="max-width:520px;margin:18px auto 0">
+        <div class="warn"><span>📱</span><div><b>START NOW:</b> Exotel KYC takes days — without it, Phase 2 can't happen.</div></div>
+        <div class="warn"><span>☁️</span><div><b>START NOW:</b> AWS + domain + TLS — wait-time that blocks Phase 6.</div></div>
+      </div>
+      <p class="hero-p">Next objective: <b style="color:var(--ink)">Milestone 0.3 — Docker + CI + first test.</b></p>
+      <a class="cta" href="progress-dashboard.html">OPEN MISSION CONTROL ▸</a>
+      <a class="cta ghost" href="#" onclick="scrollTo({top:0,behavior:'smooth'});return false">RIDE AGAIN ↺</a>` },
+];
+
+/* build chapter DOM */
+const chWrap = document.getElementById("chapters");
+CHAPTERS.forEach(c => {
+  const el = document.createElement("div");
+  el.className = "chapter " + c.side;
+  el.innerHTML = c.html;
+  chWrap.appendChild(el);
+  c.el = el;
+});
+
+/* roadmap dots */
+const roadmap = document.getElementById("roadmap");
+STATION_U.forEach((u, i) => {
+  const d = document.createElement("div");
+  d.className = "stop";
+  d.style.left = (u * 100) + "%";
+  d.innerHTML = `<span>P${i}</span>`;
+  roadmap.appendChild(d);
+});
+const stops = [...roadmap.querySelectorAll(".stop")];
+const mapFill = document.getElementById("map-fill");
+const speedEl = document.getElementById("speed");
+const chapLabel = document.getElementById("chap-label");
+const cue = document.getElementById("scroll-cue");
+
+/* ================== THREE.JS WORLD ================== */
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("scene"), antialias: true });
+} catch (e) {
+  document.getElementById("nogl").style.display = "flex";
+  document.getElementById("loader").classList.add("hide");
+  throw e;
+}
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x060B14);
+scene.fog = new THREE.Fog(0x060B14, 60, 320);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 1000);
+
+scene.add(new THREE.AmbientLight(0x2A3F5A, 1.4));
+const moon = new THREE.DirectionalLight(0x8AB8D8, 0.7);
+moon.position.set(-60, 120, -40);
+scene.add(moon);
+
+/* ---- the road curve: a winding path ---- */
+const CPTS = [];
+{
+  const SEGS = 26, SPAN = 1500;
+  for (let i = 0; i <= SEGS; i++) {
+    const z = -(i / SEGS) * SPAN;
+    const x = Math.sin(i * 0.55) * 46 + Math.sin(i * 0.21) * 30;
+    CPTS.push(new THREE.Vector3(x, 0, z));
+  }
+}
+const curve = new THREE.CatmullRomCurve3(CPTS, false, "catmullrom", 0.5);
+const ROAD_LEN = curve.getLength();
+
+/* ribbon builder: a flat strip that follows the curve */
+function ribbon(width, y, color, emissive, emissiveIntensity, opacity) {
+  const N = 900, pos = [], idx = [], up = new THREE.Vector3(0, 1, 0);
+  for (let i = 0; i <= N; i++) {
+    const u = i / N;
+    const p = curve.getPointAt(u);
+    const t = curve.getTangentAt(u);
+    const side = new THREE.Vector3().crossVectors(t, up).normalize();
+    pos.push(p.x + side.x * width / 2, y, p.z + side.z * width / 2);
+    pos.push(p.x - side.x * width / 2, y, p.z - side.z * width / 2);
+    if (i < N) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({
+    color, emissive: emissive || 0x000000, emissiveIntensity: emissiveIntensity || 0,
+    transparent: opacity !== undefined, opacity: opacity === undefined ? 1 : opacity,
+    roughness: .9, metalness: 0,
+  });
+  return new THREE.Mesh(g, m);
+}
+scene.add(ribbon(9, 0.02, 0x0D1626));                                   /* asphalt */
+scene.add(ribbon(0.35, 0.06, 0x5FD4F4, 0x5FD4F4, 1.6));                 /* center line */
+scene.add(ribbon(0.22, 0.05, 0x2A7FA0, 0x2A7FA0, 0.9, 0.85));           /* soft inner glow */
+{ /* edge lines */
+  const up = new THREE.Vector3(0, 1, 0), N = 900;
+  [-1, 1].forEach(sgn => {
+    const pts = [];
+    for (let i = 0; i <= N; i++) {
+      const u = i / N, p = curve.getPointAt(u), t = curve.getTangentAt(u);
+      const side = new THREE.Vector3().crossVectors(t, up).normalize();
+      pts.push(new THREE.Vector3(p.x + side.x * 4.4 * sgn, 0.05, p.z + side.z * 4.4 * sgn));
+    }
+    const g = new THREE.BufferGeometry().setFromPoints(pts);
+    scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x1E4A63 })));
+  });
+}
+
+/* ground */
+{
+  const g = new THREE.Mesh(
+    new THREE.PlaneGeometry(4000, 4000),
+    new THREE.MeshStandardMaterial({ color: 0x04070D, roughness: 1 })
+  );
+  g.rotation.x = -Math.PI / 2; g.position.y = -0.05;
+  scene.add(g);
+}
+
+/* starfield */
+{
+  const n = innerWidth < 700 ? 350 : 700, arr = [];
+  for (let i = 0; i < n; i++) {
+    arr.push((Math.random() - .5) * 1600, 40 + Math.random() * 300, -Math.random() * 1700 + 100);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(arr, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x9AD8F0, size: 1.6, sizeAttenuation: true, transparent: true, opacity: .8 })));
+}
+
+/* light posts along the road */
+{
+  const up = new THREE.Vector3(0, 1, 0);
+  const postGeo = new THREE.CylinderGeometry(0.09, 0.09, 5, 6);
+  const postMat = new THREE.MeshStandardMaterial({ color: 0x14243A });
+  const bulbGeo = new THREE.SphereGeometry(0.22, 8, 8);
+  const bulbMat = new THREE.MeshStandardMaterial({ color: 0x5FD4F4, emissive: 0x5FD4F4, emissiveIntensity: 2 });
+  for (let i = 0; i < 56; i++) {
+    const u = 0.015 + (i / 56) * 0.97;
+    const p = curve.getPointAt(u), t = curve.getTangentAt(u);
+    const side = new THREE.Vector3().crossVectors(t, up).normalize();
+    const sgn = i % 2 ? 1 : -1;
+    const post = new THREE.Mesh(postGeo, postMat);
+    post.position.set(p.x + side.x * 6.5 * sgn, 2.5, p.z + side.z * 6.5 * sgn);
+    const bulb = new THREE.Mesh(bulbGeo, bulbMat);
+    bulb.position.set(post.position.x, 5.1, post.position.z);
+    scene.add(post, bulb);
+  }
+}
+
+/* canvas-texture label sprite */
+function makeLabel(line1, line2, color) {
+  const cv = document.createElement("canvas"); cv.width = 512; cv.height = 144;
+  const c = cv.getContext("2d");
+  c.fillStyle = "rgba(6,11,20,.78)";
+  c.strokeStyle = color; c.lineWidth = 3;
+  c.beginPath(); c.roundRect(6, 6, 500, 132, 14); c.fill(); c.stroke();
+  c.fillStyle = color; c.font = "600 34px Menlo, monospace"; c.textAlign = "center";
+  c.fillText(line1, 256, 60);
+  c.fillStyle = "#8A9BB0"; c.font = "24px Menlo, monospace";
+  c.fillText(line2, 256, 104);
+  const tex = new THREE.CanvasTexture(cv);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+  sp.scale.set(17, 4.8, 1);
+  return sp;
+}
+
+/* station gates — one per phase */
+const gatePulse = [];
+const STATUS_COLOR = { done: 0x3DDC84, active: 0x5FD4F4, locked: 0x22384F };
+PROJECT.phases.forEach((p, i) => {
+  const u = STATION_U[i];
+  const pos = curve.getPointAt(u), t = curve.getTangentAt(u);
+  const side = new THREE.Vector3().crossVectors(t, new THREE.Vector3(0, 1, 0)).normalize();
+  const col = STATUS_COLOR[p.status];
+  const glow = p.status !== "locked";
+  const mat = new THREE.MeshStandardMaterial({
+    color: col, emissive: col, emissiveIntensity: glow ? 1.6 : 0.25,
+  });
+  const gate = new THREE.Group();
+  const pil = new THREE.CylinderGeometry(0.28, 0.28, 7.5, 8);
+  [-1, 1].forEach(sgn => {
+    const m = new THREE.Mesh(pil, mat);
+    m.position.set(side.x * 5.4 * sgn, 3.75, side.z * 5.4 * sgn);
+    gate.add(m);
+  });
+  const barGeo = new THREE.BoxGeometry(11.6, 0.5, 0.5);
+  const bar = new THREE.Mesh(barGeo, mat);
+  bar.position.y = 7.5;
+  bar.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), side);
+  gate.add(bar);
+  const label = makeLabel(
+    "PHASE " + String(p.id).padStart(2, "0") + (p.pivot ? " 🎯" : ""),
+    p.name.toUpperCase(),
+    p.status === "locked" ? "#5A6C82" : (p.status === "active" ? "#5FD4F4" : "#3DDC84")
+  );
+  label.position.y = 10.6;
+  gate.add(label);
+  gate.position.copy(pos);
+  scene.add(gate);
+  if (p.status === "active") gatePulse.push(mat);
+});
+
+/* pipeline billboards in the "machine" chapter stretch */
+PIPE.forEach((b, i) => {
+  const u = 0.125 + i * 0.012;
+  const pos = curve.getPointAt(u), t = curve.getTangentAt(u);
+  const side = new THREE.Vector3().crossVectors(t, new THREE.Vector3(0, 1, 0)).normalize();
+  const sgn = i % 2 ? 1 : -1;
+  const sp = makeLabel(b.ico + "  " + b.name.toUpperCase(), b.d.slice(0, 34), "#E8B34B");
+  sp.position.set(pos.x + side.x * 10 * sgn, 6.4, pos.z + side.z * 10 * sgn);
+  scene.add(sp);
+});
+
+/* ---- the scooter (procedural, faces +Z) ---- */
+const scooter = new THREE.Group();
+const lean = new THREE.Group();     /* lean/tilt wrapper */
+scooter.add(lean);
+{
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x5FD4F4, emissive: 0x1A4C5E, emissiveIntensity: .5, roughness: .35, metalness: .4 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x10202F, roughness: .8 });
+  const riderMat = new THREE.MeshStandardMaterial({ color: 0xE8B34B, roughness: .6 });
+
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.14, 2.1), bodyMat);
+  deck.position.y = 0.55; lean.add(deck);
+  const rear = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.5, 0.8), bodyMat);
+  rear.position.set(0, 0.85, -0.75); lean.add(rear);
+  const col = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1.15, 8), darkMat);
+  col.position.set(0, 1.15, 0.85); col.rotation.x = 0.32; lean.add(col);
+  const bars = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.85, 8), darkMat);
+  bars.rotation.z = Math.PI / 2; bars.position.set(0, 1.7, 0.68); lean.add(bars);
+
+  /* rider */
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.55, 4, 8), riderMat);
+  torso.position.set(0, 1.55, -0.42); torso.rotation.x = -0.18; lean.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 12),
+    new THREE.MeshStandardMaterial({ color: 0xDCE8F5, roughness: .3, metalness: .2 }));
+  head.position.set(0, 2.12, -0.34); lean.add(head);
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.09, 0.06),
+    new THREE.MeshStandardMaterial({ color: 0x5FD4F4, emissive: 0x5FD4F4, emissiveIntensity: 1.5 }));
+  visor.position.set(0, 2.13, -0.15); lean.add(visor);
+
+  /* wheels: torus + spoke box so the spin is visible */
+  function wheel(z) {
+    const w = new THREE.Group();
+    const tire = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.11, 10, 20), darkMat);
+    tire.rotation.y = Math.PI / 2;
+    const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.6, 0.08),
+      new THREE.MeshStandardMaterial({ color: 0x5FD4F4, emissive: 0x5FD4F4, emissiveIntensity: .8 }));
+    w.add(tire, spoke);
+    w.position.set(0, 0.34, z);
+    lean.add(w);
+    return w;
+  }
+  var wheelF = wheel(1.05), wheelR = wheel(-1.0);
+
+  /* headlight */
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 8),
+    new THREE.MeshStandardMaterial({ color: 0xFFF7DD, emissive: 0xFFF2C4, emissiveIntensity: 2.5 }));
+  lamp.position.set(0, 1.45, 1.02); lean.add(lamp);
+  const head1 = new THREE.SpotLight(0xCFEFFF, 60, 46, 0.42, 0.5, 1.4);
+  head1.position.set(0, 1.5, 1.0);
+  const tgt = new THREE.Object3D(); tgt.position.set(0, 0.3, 14);
+  lean.add(head1, tgt); head1.target = tgt;
+  /* soft glow under scooter */
+  const under = new THREE.PointLight(0x5FD4F4, 8, 7);
+  under.position.set(0, 0.5, 0); lean.add(under);
+}
+scene.add(scooter);
+
+/* exhaust puffs */
+const PUFF_N = 26;
+const puffPos = new Float32Array(PUFF_N * 3), puffAge = new Float32Array(PUFF_N).fill(9);
+const puffGeo = new THREE.BufferGeometry();
+puffGeo.setAttribute("position", new THREE.BufferAttribute(puffPos, 3));
+const puffs = new THREE.Points(puffGeo, new THREE.PointsMaterial({ color: 0x7FB6CC, size: 0.5, transparent: true, opacity: 0.5 }));
+scene.add(puffs);
+let puffI = 0;
+
+/* ================== SCROLL → RIDE ================== */
+let targetU = 0, u = 0, prevU = 0, started = false;
+function onScroll() {
+  const max = document.body.scrollHeight - innerHeight;
+  targetU = Math.min(1, Math.max(0, scrollY / max));
+  if (scrollY > 40 && !started) { started = true; cue.classList.add("hide"); }
+}
+addEventListener("scroll", onScroll, { passive: true });
+onScroll();
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* per-chapter camera offsets (in scooter-local space) */
+const CAMS = [
+  { at: 0.00, back: 8.5, up: 3.2, side: 2.6, ahead: 10 },   /* hero: close 3/4 */
+  { at: 0.06, back: 10, up: 4.5, side: -5.5, ahead: 8 },    /* mission: left side */
+  { at: 0.13, back: 11, up: 5, side: 6, ahead: 9 },         /* machine: right side */
+  { at: 0.21, back: 16, up: 9, side: 0.1, ahead: 14 },      /* budget: high back */
+  { at: 0.30, back: 9, up: 3.4, side: 4, ahead: 10 },
+  { at: 0.50, back: 12, up: 6, side: -6, ahead: 10 },
+  { at: 0.70, back: 9, up: 3.2, side: 3.5, ahead: 10 },
+  { at: 0.88, back: 14, up: 8, side: -3, ahead: 12 },
+  { at: 0.985, back: 12, up: 4, side: 7, ahead: 4 },        /* finish: side hero shot */
+];
+function camAt(uu) {
+  let a = CAMS[0], b = CAMS[CAMS.length - 1];
+  for (let i = 0; i < CAMS.length - 1; i++) {
+    if (uu >= CAMS[i].at && uu <= CAMS[i + 1].at) { a = CAMS[i]; b = CAMS[i + 1]; break; }
+  }
+  const span = Math.max(1e-5, b.at - a.at);
+  let k = Math.min(1, Math.max(0, (uu - a.at) / span));
+  k = k * k * (3 - 2 * k); /* smoothstep */
+  return {
+    back: a.back + (b.back - a.back) * k,
+    up: a.up + (b.up - a.up) * k,
+    side: a.side + (b.side - a.side) * k,
+    ahead: a.ahead + (b.ahead - a.ahead) * k,
+  };
+}
+
+/* ================== MAIN LOOP ================== */
+const clock = new THREE.Clock();
+const UP = new THREE.Vector3(0, 1, 0);
+let prevTangent = curve.getTangentAt(0);
+let elapsed = 0;
+
+function frame() {
+  requestAnimationFrame(frame);
+  if (document.hidden) return;
+  const dt = Math.min(clock.getDelta(), 0.05);
+  elapsed += dt;
+
+  /* ease toward scroll target */
+  u += (targetU - u) * (reduced ? 1 : Math.min(1, dt * 3.2));
+  const speed = Math.abs(u - prevU) * ROAD_LEN / Math.max(dt, 1e-4);
+  prevU = u;
+
+  /* scooter on the curve */
+  const uu = Math.min(0.999, Math.max(0.0005, u));
+  const pos = curve.getPointAt(uu);
+  const tan = curve.getTangentAt(uu);
+  scooter.position.copy(pos);
+  scooter.lookAt(pos.clone().add(tan));
+
+  /* lean into curves + idle hover */
+  const turn = new THREE.Vector3().crossVectors(prevTangent, tan).y * 900;
+  prevTangent.copy(tan);
+  const targetLean = reduced ? 0 : Math.max(-0.4, Math.min(0.4, -turn * (speed / 60)));
+  lean.rotation.z += (targetLean - lean.rotation.z) * 0.12;
+  lean.position.y = reduced ? 0 : Math.sin(elapsed * 2.2) * 0.035;
+
+  /* wheels */
+  const spin = speed * dt / 0.34;
+  wheelF.rotation.x += spin; wheelR.rotation.x += spin;
+
+  /* exhaust puffs */
+  if (speed > 4 && !reduced) {
+    puffI = (puffI + 1) % PUFF_N;
+    const back = pos.clone().addScaledVector(tan, -1.4);
+    puffPos[puffI * 3] = back.x + (Math.random() - .5) * .3;
+    puffPos[puffI * 3 + 1] = 0.5;
+    puffPos[puffI * 3 + 2] = back.z + (Math.random() - .5) * .3;
+    puffAge[puffI] = 0;
+  }
+  for (let i = 0; i < PUFF_N; i++) {
+    if (puffAge[i] < 2) { puffAge[i] += dt; puffPos[i * 3 + 1] += dt * 1.1; }
+    else { puffPos[i * 3 + 1] = -10; }
+  }
+  puffGeo.attributes.position.needsUpdate = true;
+
+  /* pulsing active gate */
+  const pulse = 1.1 + Math.sin(elapsed * 3) * 0.7;
+  gatePulse.forEach(m => { m.emissiveIntensity = reduced ? 1.4 : pulse; });
+
+  /* camera */
+  const cw = camAt(uu);
+  const side = new THREE.Vector3().crossVectors(tan, UP).normalize();
+  const desired = pos.clone()
+    .addScaledVector(tan, -cw.back)
+    .addScaledVector(side, cw.side)
+    .add(new THREE.Vector3(0, cw.up, 0));
+  if (reduced) camera.position.copy(desired);
+  else camera.position.lerp(desired, Math.min(1, dt * 3.5));
+  const lookP = pos.clone().addScaledVector(tan, cw.ahead * 0.35).add(new THREE.Vector3(0, 1.4, 0));
+  camera.lookAt(lookP);
+
+  /* ---- HUD + chapters ---- */
+  mapFill.style.width = (u * 100).toFixed(2) + "%";
+  stops.forEach((s, i) => {
+    s.classList.toggle("lit", u >= STATION_U[i] - 0.02);
+    if (PROJECT.phases[i].status === "done") s.classList.add("done-st");
+  });
+  speedEl.textContent = Math.round(speed * 3.6) + " KM/H";
+  let label = "THE ROAD";
+  CHAPTERS.forEach(c => {
+    const on = u >= c.u[0] && u <= c.u[1];
+    c.el.classList.toggle("on", on);
+    if (on) label = c.label;
+  });
+  chapLabel.textContent = label;
+
+  renderer.render(scene, camera);
+}
+
+/* ================== LOADER (short boot, then reveal) ================== */
+const loader = document.getElementById("loader");
+const lFill = document.getElementById("l-fill");
+const lPct = document.getElementById("l-pct");
+let lp = 0;
+const boot = setInterval(() => {
+  lp = Math.min(100, lp + 7 + Math.random() * 10);
+  lFill.style.width = lp + "%";
+  lPct.textContent = Math.round(lp) + "%";
+  if (lp >= 100) {
+    clearInterval(boot);
+    loader.classList.add("hide");
+  }
+}, 60);
+
+frame();
+</script>
+</body>
+</html>

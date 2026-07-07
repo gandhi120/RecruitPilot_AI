@@ -9,11 +9,11 @@
 
 Stand up the project's entire **data layer** as one managed service — before any application code exists:
 
-- A Supabase project in **Mumbai (`ap-south-1`)** — the same region as our EC2 instance, because the latency budget (doc 01 §3.5) leaves no room for cross-region database hops.
+- A Supabase project in **Mumbai (`ap-south-1`)** — the same region as our EC2 instance, because the webhook response budgets (doc 01: identify <500ms, tool calls <800ms) leave no room for cross-region database hops.
 - The **three keys** (URL, anon, service_role) understood and stored correctly — this is the single highest-stakes secret-handling moment in the project so far.
 - The **two Postgres connection strings** (pooled :6543 for runtime, direct :5432 for migrations) captured for Prisma in doc 11.
 - **Auth** configured for exactly one user (Varun), with public signups disabled.
-- **Storage** with two private buckets: `recordings` (call audio) and `documents` (the resume the agent sends).
+- **Storage** with two private buckets: `recordings` (call audio — downloaded from Bolna's recording URLs by the `store-recording` job, docs 08/17) and `documents` (the resume the agent sends).
 - **Realtime** understood, ready to enable per-table once tables exist (doc 11).
 
 By the end, every credential doc 09–11 needs is in your password manager and `.env`, and every claim is verified with a real command — not assumed.
@@ -34,13 +34,13 @@ Supabase is **not** a proprietary database. It is a **managed PostgreSQL instanc
 | Files | **Storage** (Postgres-backed metadata + object store) | Call recordings, resume PDF |
 | Live updates | **Realtime** (listens to Postgres replication) | Dashboard updates the instant a call row changes |
 
-The unifying insight: **it's all one Postgres**. A row inserted by our worker via Prisma is instantly visible to PostgREST (web reads), instantly streamed by Realtime (live dashboard), and instantly governed by the same security rules. That's why we chose it over "Postgres on EC2 + roll our own auth + S3 + a WebSocket relay" — four builds collapse into one signup (doc 01 §3.2 placement table).
+The unifying insight: **it's all one Postgres**. A row inserted by our worker via Prisma is instantly visible to PostgREST (web reads), instantly streamed by Realtime (live dashboard), and instantly governed by the same security rules. That's why we chose it over "Postgres on EC2 + roll our own auth + S3 + a WebSocket relay" — four builds collapse into one signup (doc 01).
 
 ### 2.2 Row Level Security — our authorization floor
 
 Normally, authorization lives in application code: `if (user.id !== row.ownerId) throw 403`. One forgotten check = data leak. **Row Level Security (RLS)** moves authorization *into Postgres itself*: every table carries policies like "a row is visible only when `auth.uid() = user_id`", and Postgres enforces them on **every query from every client** — PostgREST, Realtime, even a stray SQL console session using the wrong role.
 
-Why this is our *floor*, not a feature: doc 03 §12 established that `apps/web` has no Prisma and no privileged key by structure. The browser talks to PostgREST directly. The **only** thing standing between a compromised browser bundle and the full recruiter database is RLS. So our stance is absolute:
+Why this is our *floor*, not a feature: doc 03 established that `apps/web` has no Prisma and no privileged key by structure. The browser talks to PostgREST directly. The **only** thing standing between a compromised browser bundle and the full recruiter database is RLS. So our stance is absolute:
 
 > **RLS is enabled on every table, always, from the first migration. A table without RLS is a bug, not a default.**
 
@@ -55,7 +55,7 @@ Supabase issues two API keys. They look similar (both are long JWTs). Their sema
 | RLS | **Bound by RLS** — sees only what policies allow | **Bypasses RLS entirely** — sees and writes everything |
 | Intended holder | Browsers, mobile apps — *public by design* | Trusted servers only (our api + worker) |
 | If leaked | Attacker gets… whatever an anonymous visitor gets (with good RLS: nothing) | Attacker gets **the entire database** |
-| Our usage | `apps/web` (as `NEXT_PUBLIC_SUPABASE_ANON_KEY`) | `apps/api` / worker env only (doc 03 §12) |
+| Our usage | `apps/web` (as `NEXT_PUBLIC_SUPABASE_ANON_KEY`) | `apps/api` / worker env only (doc 03) |
 
 The mental model: the anon key is a *door key to the lobby* — RLS decides which rooms open. The service_role key is the *master key that ignores every lock*. This is why the single worst mistake in this document is prefixing the service_role key with `NEXT_PUBLIC_` (§10).
 
@@ -80,7 +80,7 @@ Remember it as: **6543 = the app talking, 5432 = the schema changing.**
 
 ## 3. Architecture
 
-Where Supabase sits in the container view (doc 01 §3.2), with every access path and the key/port it uses:
+Where Supabase sits in the container view (doc 01), with every access path and the key/port it uses:
 
 ```mermaid
 flowchart TB
@@ -106,7 +106,7 @@ flowchart TB
 
     API -->|"Prisma · DATABASE_URL :6543"| POOL
     WORKER -->|"Prisma · DATABASE_URL :6543"| POOL
-    WORKER -->|"service_role key<br/>upload recordings, signed URLs"| STOR
+    WORKER -->|"service_role key<br/>store Bolna recordings, signed URLs"| STOR
     CI -->|"DIRECT_URL :5432"| PG
     WEB -->|"anon key + user JWT<br/>RLS-filtered reads"| REST
     WEB -->|"anon key · login"| AUTH
@@ -139,7 +139,7 @@ Click-level, from absolute zero. Have your password manager open before you star
 ### 5.1 Create the account
 
 1. Go to **https://supabase.com** → click **Start your project**.
-2. Sign up. **Choose "Continue with GitHub"** — recommended because (a) you'll create a GitHub account anyway for CI/CD (doc 14), (b) one less password to manage, (c) GitHub's 2FA then protects Supabase too. Use the project identity you fixed in doc 00 §5 (varun@digiqc.com on the GitHub account).
+2. Sign up. **Choose "Continue with GitHub"** — recommended because (a) you'll create a GitHub account anyway for CI/CD (doc 14), (b) one less password to manage, (c) GitHub's 2FA then protects Supabase too. Use the project identity you fixed in doc 00 (varun@digiqc.com on the GitHub account).
 3. If you used email signup instead: check your inbox and **verify the email** before continuing — an unverified account can't create projects.
 
 ### 5.2 Create the organization and project
@@ -148,7 +148,7 @@ Click-level, from absolute zero. Have your password manager open before you star
 2. Click **New Project** and fill in:
    - **Name:** `recruitpilot-ai`
    - **Database Password:** click **Generate a password**. Immediately copy it into your password manager as `Supabase recruitpilot-ai DB password`. **You cannot retrieve this password later** — Supabase never shows it again; if lost, your only option is *resetting* it (Project Settings → Database → Reset database password), which breaks every stored connection string until you update them.
-   - **Region:** **Mumbai (`ap-south-1`)**. Non-negotiable: our EC2 lives in ap-south-1 (doc 01 §3.2) and the latency budget already sits at ~1,450 ms of a 1,500 ms allowance (doc 01 §3.5). A Singapore or Frankfurt database adds 40–150 ms per round trip to the async plane and, worse, to every dashboard read.
+   - **Region:** **Mumbai (`ap-south-1`)**. Non-negotiable: our EC2 lives in ap-south-1 (doc 01), and the identify webhook must answer Bolna in under 500 ms including its recruiter+memory lookup (doc 01). A Singapore or Frankfurt database adds 40–150 ms per round trip to every webhook handler and, worse, to every dashboard read.
    - **Plan:** Free. Roughly 500 MB database + 1 GB storage — plenty for this build; check current limits at https://supabase.com/pricing.
 3. Click **Create new project** and wait ~2 minutes for provisioning ("Setting up project…" → green **Active** dot).
 
@@ -187,7 +187,7 @@ Only Varun ever logs in — the dashboard is a one-person cockpit. So we allow e
 ### 5.6 Create the Storage buckets (both PRIVATE)
 
 1. Sidebar → **Storage** → **New bucket**:
-   - Name: `recordings` · **Public bucket: OFF**. Call recordings are PII-laden audio of real people (doc 00 §12); a public bucket means anyone with the URL can listen. Create.
+   - Name: `recordings` · **Public bucket: OFF**. Call recordings are PII-laden audio of real people (doc 00); a public bucket means anyone with the URL can listen. The files themselves arrive later: Bolna records each call and exposes a recording URL in its post-call webhook, and our `store-recording` job downloads that file into this bucket so we own a copy under our retention rules (docs 08, 17). Create.
 2. **New bucket** again:
    - Name: `documents` · **Public bucket: OFF**. Create.
 3. Upload the resume: open the `documents` bucket → **Upload file** → select Varun's resume PDF → ensure the stored name is exactly **`resume.pdf`** (rename the local file first, or use the dashboard's rename after upload). The `send_resume` tool (doc 16) fetches `documents/resume.pdf` by this exact path.
@@ -200,7 +200,7 @@ Realtime streams row changes to the dashboard by listening to Postgres **logical
 - Dashboard path: **Database** → **Replication** (or Publications) → toggle the `calls` (and later `notifications`) tables into `supabase_realtime` — verify in dashboard, UI evolves;
 - or SQL: `ALTER PUBLICATION supabase_realtime ADD TABLE calls;`
 
-That single toggle is what makes doc 00 §5.1 step 9 ("dashboard updates live") work with zero polling code.
+That single toggle is what makes the life-of-a-call narrative's final step ("dashboard updates live", doc 00) work with zero polling code.
 
 ---
 
@@ -226,7 +226,7 @@ That single toggle is what makes doc 00 §5.1 step 9 ("dashboard updates live") 
 Nothing to install for Supabase itself (it's a cloud service), but stage your credentials so §9's verification works. From the repo root:
 
 ```bash
-# 1. Ensure .env can never be committed (doc 03 §12 — born safe)
+# 1. Ensure .env can never be committed (doc 03 — born safe)
 grep -q "^\.env" .gitignore || printf ".env\n.env.*\n!.env.example\n" >> .gitignore
 
 # 2. Create .env with the seven variables (fill real values from §5.3/§5.4)
@@ -253,19 +253,19 @@ Copy the exact host strings from the dashboard's Connect dialog — pooler hostn
 
 ## 8. Environment Variables
 
-Seven variables enter the project — the first real entries in `.env` / `.env.example`. Naming and storage follow doc 00 §8 and doc 03 §8.
+Seven variables enter the project — the first real entries in `.env` / `.env.example`. Naming and storage follow docs 00 and 03.
 
 | Variable | Value | Used by | Stored in |
 |---|---|---|---|
 | `SUPABASE_URL` | Project URL | api + worker (Storage adapter, doc 12) | `.env` local · GitHub Secrets + server env for prod |
 | `SUPABASE_ANON_KEY` | anon / publishable key | api (rarely — user-scoped ops) | `.env` · GitHub Secrets |
-| `SUPABASE_SERVICE_ROLE_KEY` | service_role / secret key | **api + worker ONLY** — never web (doc 03 §12) | `.env` · GitHub Secrets |
+| `SUPABASE_SERVICE_ROLE_KEY` | service_role / secret key | **api + worker ONLY** — never web (doc 03) | `.env` · GitHub Secrets |
 | `DATABASE_URL` | Pooled string, **:6543**, `?pgbouncer=true&connection_limit=1` | Prisma Client at runtime (api + worker) | `.env` · GitHub Secrets |
 | `DIRECT_URL` | Direct string, **:5432** | Prisma migrate/introspect (`directUrl`, doc 11) — local + CI | `.env` · GitHub Secrets |
 | `NEXT_PUBLIC_SUPABASE_URL` | Same value as `SUPABASE_URL` | web (browser Supabase client, doc 10) | `.env` · GitHub Secrets (baked into web build) |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Same value as `SUPABASE_ANON_KEY` | web (browser Supabase client) | `.env` · GitHub Secrets |
 
-Why the duplication (`SUPABASE_URL` vs `NEXT_PUBLIC_SUPABASE_URL`)? The `NEXT_PUBLIC_` prefix is a *contract*, not decoration (doc 00 §8): Next.js inlines such values into the browser bundle. Keeping separate names means a reviewer can verify at a glance that **no variable both holds a secret and carries the public prefix**. The URL and anon key are safe to expose — that is precisely what the anon key is for (§2.3). The service_role key gets no public twin, ever.
+Why the duplication (`SUPABASE_URL` vs `NEXT_PUBLIC_SUPABASE_URL`)? The `NEXT_PUBLIC_` prefix is a *contract*, not decoration (doc 00): Next.js inlines such values into the browser bundle. Keeping separate names means a reviewer can verify at a glance that **no variable both holds a secret and carries the public prefix**. The URL and anon key are safe to expose — that is precisely what the anon key is for (§2.3). The service_role key gets no public twin, ever.
 
 Why `?pgbouncer=true&connection_limit=1` on `DATABASE_URL`? `pgbouncer=true` tells Prisma the connection passes through a transaction-mode pooler, so it disables prepared statements (which need session state, §2.4). `connection_limit=1` caps *each Prisma Client's* internal pool at one connection — sane for our small always-on processes and generous free-tier headroom; the pooler does the real multiplexing, so a big client-side pool buys nothing and burns pooler slots (api + worker = 2 connections total instead of Prisma's default `num_cpus × 2 + 1` each).
 
@@ -332,7 +332,7 @@ curl -s -X POST "$SUPABASE_URL/auth/v1/token?grant_type=password" \
 1. **`NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY`.** The catastrophic one: the prefix inlines the RLS-bypassing key into the browser bundle — full database read/write for anyone who opens DevTools. The service_role key never gets a `NEXT_PUBLIC_` twin; doc 09's config schema and code review both check for this.
 2. **Using the direct connection (:5432) as the app's runtime `DATABASE_URL`.** Works fine in dev with one process; in prod, api + worker + redeploy overlap exhausts the direct connection limit and every query dies with `too many connections`. Runtime = pooled :6543, always.
 3. **Forgetting `?pgbouncer=true` on the pooled URL.** Prisma tries prepared statements through a transaction-mode pooler → intermittent `prepared statement "s0" already exists` errors that look like ghosts. The parameter is not optional.
-4. **Wrong region.** A project created in the default region (often US) cannot be moved with a click — you'd migrate data to a new project. 200+ ms per DB round trip demolishes dashboard feel and async-plane throughput. Double-check **Mumbai `ap-south-1`** *before* clicking Create.
+4. **Wrong region.** A project created in the default region (often US) cannot be moved with a click — you'd migrate data to a new project. 200+ ms per DB round trip blows the identify webhook's 500 ms budget (doc 01) and demolishes dashboard feel. Double-check **Mumbai `ap-south-1`** *before* clicking Create.
 5. **Free-tier project pausing.** Free projects **pause after ~7 days of inactivity** — API and DB return errors until resumed. During the build you'll touch it daily; if it pauses (holiday week), dashboard → project → **Restore/Resume** button, wait a minute, everything returns intact. Production on free tier must account for this (§11).
 6. **Losing the DB password.** It is shown once, at creation. Not stored = gone; reset breaks `DATABASE_URL` and `DIRECT_URL` everywhere until updated (.env, GitHub Secrets, server). Password manager, immediately, no exceptions.
 7. **Leaving public signups enabled.** Anyone can then mint a valid authenticated JWT for your project. RLS *should* still protect data — but "should" is not a security posture for a one-user system. Close the door (§5.5).
@@ -345,8 +345,8 @@ curl -s -X POST "$SUPABASE_URL/auth/v1/token?grant_type=password" \
 - **Separate dev and prod projects.** Two Supabase projects (`recruitpilot-ai-dev`, `recruitpilot-ai`) = separate keys, separate data, and a migration rehearsal stage. Free tier allows two active projects, so this costs nothing. Doc 14's deploy pipeline targets the prod project's secrets only.
 - **Know the pause rule before go-live.** A paused prod database is an outage. Options: log a daily heartbeat query (fragile), or upgrade to a paid plan when the system goes truly live — paid projects don't pause. Decide consciously at doc 15, not during an incident.
 - **Point-in-Time Recovery (PITR)** — restore the DB to any second, not just the latest daily backup — is a **paid add-on**. Free tier gives daily backups (7-day retention at time of writing — check current limits at https://supabase.com/pricing). For a call-log system, losing "up to 24 h" may be acceptable initially; revisit when the data becomes irreplaceable.
-- **Watch the usage page monthly.** Dashboard → Settings/Usage (or Reports) shows DB size, storage, egress against plan limits. Call recordings are the growth driver here — μ-law audio ≈ 0.5 MB/min, so 1 GB storage ≈ ~2,000 call-minutes. Set a reminder before the ceiling surprises you.
-- **Treat Supabase keys like every other secret** (doc 00 §12): password manager for humans, `.env` git-ignored locally, GitHub Secrets + server env in prod, rotate on any suspicion of leak — no special-casing because "it's just the database".
+- **Watch the usage page monthly.** Dashboard → Settings/Usage (or Reports) shows DB size, storage, egress against plan limits. Call recordings are the growth driver here — the audio files the `store-recording` job pulls from Bolna run roughly 0.5–1 MB per call-minute depending on format, so 1 GB of storage covers on the order of 1,000–2,000 call-minutes. Set a reminder before the ceiling surprises you.
+- **Treat Supabase keys like every other secret** (doc 00): password manager for humans, `.env` git-ignored locally, GitHub Secrets + server env in prod, rotate on any suspicion of leak — no special-casing because "it's just the database".
 
 ---
 
@@ -355,7 +355,7 @@ curl -s -X POST "$SUPABASE_URL/auth/v1/token?grant_type=password" \
 The data layer's posture, set today and enforced in docs 11 and 18:
 
 - **RLS on by default, everywhere.** Every table created in doc 11 ships with `ENABLE ROW LEVEL SECURITY` plus explicit policies (Varun's authenticated user: read; nothing else). No policy = nobody reads via PostgREST — fail closed, exactly right. The service_role path (api/worker) is unaffected because it bypasses RLS by design.
-- **Key blast radius, mapped:** anon key leaked → attacker sees what RLS grants an anonymous stranger (nothing). Dashboard password leaked → attacker sees what RLS grants Varun (everything — hence a strong unique password + the closed-signup door). service_role key leaked → full database — hence it exists *only* in api/worker env (doc 03 §12) and GitHub Secrets, and a repo-wide grep for it must only ever hit `.env` (git-ignored) — never source, never `packages/shared`, never client code.
+- **Key blast radius, mapped:** anon key leaked → attacker sees what RLS grants an anonymous stranger (nothing). Dashboard password leaked → attacker sees what RLS grants Varun (everything — hence a strong unique password + the closed-signup door). service_role key leaked → full database — hence it exists *only* in api/worker env (doc 03) and GitHub Secrets, and a repo-wide grep for it must only ever hit `.env` (git-ignored) — never source, never `packages/shared`, never client code.
 - **Rotation path (know it before you need it):** Project Settings → API → regenerate/revoke keys (with the new key system, create a new secret key, roll it out, delete the old — verify in dashboard, UI evolves). Rotating invalidates the old key everywhere at once — update `.env`, GitHub Secrets, and the server env in the same change. Database password resets separately (Project Settings → Database).
 - **Bucket policies are RLS too.** Storage authorizes via policies on `storage.objects`. Our private buckets have **no anonymous-read policies at all**: the worker writes and mints signed URLs with the service_role key (policy-exempt); the dashboard receives short-lived signed URLs from our API. No standing public access anywhere.
 - **Backups are a security control, not just ops.** Ransomware-style deletion (or a bad migration) is recoverable only as far as your backup story reaches: free tier = daily, 7 days. Acceptable for the build phase; reassess with PITR (§11) before the data matters.
@@ -384,4 +384,4 @@ The data layer's posture, set today and enforced in docs 11 and 18:
 
 ## 14. Next Step
 
-Proceed to **`05_EXOTEL_SETUP.md`** — the telephony layer: Exotel account and KYC (start it immediately — doc 00 warned this takes days, not minutes), buying the virtual number recruiters will dial, building the call flow that opens the WebSocket to our server, and webhook security. After it, a real phone number rings into your architecture.
+Proceed to **`05_BOLNA_SETUP.md`** — the voice platform: creating the Bolna account, understanding the prepaid credit model and pricing, buying the Indian number recruiters will dial (including the regulated-number compliance pointers), capturing `BOLNA_API_KEY`, and creating the agent that will answer calls. After it, a real phone number rings into your architecture. (The original DIY telephony docs are preserved in `docs/phase2-diy-reference/`.)

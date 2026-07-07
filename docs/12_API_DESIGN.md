@@ -7,13 +7,13 @@
 
 ## 1. Goal
 
-Design the **complete HTTP + WebSocket surface** of `apps/api` before implementing another endpoint — so that every route, status code, error shape, and auth rule is a *decision*, not an accident:
+Design the **complete HTTP surface** of `apps/api` before implementing another endpoint — so that every route, status code, error shape, and auth rule is a *decision*, not an accident:
 
 - Model the resources RESTfully: **nouns, plural, predictable** — a dashboard client (doc 10) should be able to guess the next URL.
 - Fix **one error envelope** used by every failure path — validation, auth, business rules, and 500s all speak the same shape.
 - Choose and justify **URL versioning (`/v1`)** and **cursor-based pagination** — the two contracts hardest to change later.
-- Produce the **full endpoint inventory**: every route, its method, auth class, and the Zod schemas (in `packages/shared`, doc 03) that define its request/response shapes.
-- Define the **WebSocket protocol boundary**: exactly one custom WS surface (Exotel voice streaming, doc 05) — and explain why the dashboard deliberately gets none.
+- Produce the **full endpoint inventory**: every route, its method, auth class, and the Zod schemas (in `packages/shared`, doc 03) that define its request/response shapes — including the **three Bolna webhook surfaces** (identify, tools, post-call), whose detailed contracts live in doc 08.
+- Explain why the whole API is **plain HTTPS — no WebSocket surface at all**: Bolna owns the voice stream, Supabase Realtime owns the live dashboard.
 - Keep **OpenAPI generated, never handwritten**: Zod schemas → `fastify-type-provider-zod` → Swagger UI (doc 02), so docs can never drift from code.
 
 By the end you can state, for any URL in the system, who may call it, what it returns on success, and what it returns on every failure — from memory.
@@ -54,7 +54,7 @@ Status codes are the response's machine-readable half. The ones this API uses, a
 | `201 Created` | Resource created | Successful creating POST (rare here — most creation happens via jobs) |
 | `204 No Content` | Success, nothing to say | Successful `erase`; webhook acks may also use 200 |
 | `400 Bad Request` | Malformed request (unparseable JSON, bad cursor) | Body isn't valid JSON; cursor fails to decode |
-| `401 Unauthorized` | Who are you? Missing/invalid credentials | No `Authorization` header; expired/invalid JWT; wrong webhook/WS token |
+| `401 Unauthorized` | Who are you? Missing/invalid credentials | No `Authorization` header; expired/invalid JWT; wrong webhook Bearer token |
 | `403 Forbidden` | I know who you are; you still can't | Valid JWT but not Varun's user (single-tenant check, §12) |
 | `404 Not Found` | Resource doesn't exist | `GET /v1/calls/:id` with an unknown id — **same envelope as every other error** |
 | `409 Conflict` | State conflict | e.g., erase requested while erase already in progress |
@@ -76,7 +76,7 @@ Every public contract eventually needs a breaking change. Three mainstream strat
 
 The purists' objection — "URLs should identify resources, not representations" — is academically correct and practically irrelevant at our scale. We optimize for **debuggability**: when a call log says `GET /v1/calls 422`, you know everything.
 
-Scope note: only *dashboard* routes carry `/v1`. Vendor-facing routes (`/webhooks/exotel/status`, `/voice/stream`) and infra routes (`/health`, `/ready`) are configured in external systems (Exotel dashboard, load balancer) — their "versioning" is coordinating a config change with the vendor, and a `/v1` prefix would add ceremony without the ability to actually run two versions side by side.
+Scope note: only *dashboard* routes carry `/v1`. Vendor-facing routes (`/webhooks/bolna/*`) and infra routes (`/health`, `/ready`) are configured in external systems (the Bolna agent's tool/webhook URLs, the load balancer) — their "versioning" is coordinating a config change with the vendor, and a `/v1` prefix would add ceremony without the ability to actually run two versions side by side.
 
 ### 2.4 Pagination — cursor over offset
 
@@ -130,7 +130,7 @@ The envelope is produced in exactly **one place**: Fastify's `setErrorHandler`, 
 
 ### 2.6 Idempotency for webhooks
 
-Exotel retries StatusCallbacks on timeouts and non-2xx responses (doc 05 §11) — duplicate delivery is *normal operation*, not an edge case. `POST /webhooks/exotel/status` must therefore be **idempotent**: processing the same callback twice must equal processing it once. Mechanism (doc 01 §3.6): every side effect is keyed by `CallSid` — the handler checks whether this call's terminal event was already recorded (or uses BullMQ's job-id dedupe with `jobId = callSid`) and, on a duplicate, does nothing and still returns 200. Returning an error on a duplicate would make Exotel retry *again* — the correct answer to "I already know" is "thanks, got it."
+Webhook vendors retry on timeouts and non-2xx responses — duplicate delivery is *normal operation*, not an edge case (Bolna's exact retry policy: verify against https://www.bolna.ai/docs and design for retries regardless). `POST /webhooks/bolna/post-call` must therefore be **idempotent**: processing the same completion twice must equal processing it once. Mechanism (doc 01, contract details in doc 08): every side effect is keyed by the Bolna `execution_id` — the handler checks whether this execution was already recorded (the `calls.execution_id` UNIQUE constraint from doc 11, plus BullMQ's job-id dedupe with `jobId = executionId`) and, on a duplicate, does nothing and still returns 200. Returning an error on a duplicate would make Bolna retry *again* — the correct answer to "I already know" is "thanks, got it."
 
 ### 2.7 OpenAPI: generated, never handwritten
 
@@ -148,14 +148,15 @@ The same Zod schema is simultaneously: (a) runtime request validation, (b) the r
 
 ### 3.1 The endpoint inventory (the contract, in one table)
 
-Three **auth classes** cover every route: `JWT` (Supabase JWT in `Authorization: Bearer`, verified in a Fastify `preHandler` — §12), `TOKEN` (vendor-facing, `VOICE_WS_AUTH_TOKEN`/callback token + IP allowlist, doc 05), and `NONE` (infra probes, safe by construction).
+Three **auth classes** cover every route: `JWT` (Supabase JWT in `Authorization: Bearer`, verified in a Fastify `preHandler` — §12), `TOKEN` (Bolna-facing: `Authorization: Bearer BOLNA_WEBHOOK_TOKEN`, the token *we* generated and configured into the Bolna agent — docs 05/08), and `NONE` (infra probes, safe by construction).
 
 | Method | Path | Auth | Request schema | Response schema | Purpose |
 |---|---|---|---|---|---|
 | `GET` | `/health` | NONE | — | `HealthResponse` | Liveness probe (doc 09) — process is up |
 | `GET` | `/ready` | NONE | — | `ReadyResponse` | Readiness — DB + Redis reachable (doc 09) |
-| `POST` | `/webhooks/exotel/status` | TOKEN | `ExotelStatusCallback` | `204` | Call lifecycle events; idempotent by `CallSid`; emits `call.completed` (docs 01 §3.6, 05 §2.5) |
-| `GET` | `/voice/stream` | TOKEN | WS upgrade + `?token=` | WS session (§3.4) | Exotel bidirectional audio stream (docs 05, 17) |
+| `GET` | `/webhooks/bolna/identify` | TOKEN | `BolnaIdentifyQuery` (`contact_number`, `agent_id`, `execution_id`) | `IdentifyResponse` (dynamic variables JSON) | Inbound caller identification + memory read at call start; **<500ms** (docs 01, 08) |
+| `POST` | `/webhooks/bolna/tools/*` | TOKEN | per-tool schemas (doc 08) | per-tool JSON result | The four `custom_task` tools (`check_calendar`, `save_recruiter`, `send_resume`, `notify_varun`); execute fast or enqueue + `{queued:true}`; **<800ms** (docs 08, 16) |
+| `POST` | `/webhooks/bolna/post-call` | TOKEN | `BolnaPostCallPayload` (`.passthrough()`, doc 08) | `200` | Execution completed: transcript/recording/metadata; ack + enqueue only; idempotent by `execution_id` (docs 01, 08, 17) |
 | `GET` | `/v1/calls` | JWT | `CallListQuery` | `CallListResponse` | List calls; cursor pagination; filters: `status`, `recruiterId`, `from`, `to` |
 | `GET` | `/v1/calls/:id` | JWT | `CallIdParams` | `CallResponse` | One call **with transcript + summary** |
 | `GET` | `/v1/calls/:id/recording` | JWT | `CallIdParams` | `RecordingUrlResponse` | Short-lived **signed URL** from Supabase Storage (§12) — never the audio bytes through our API |
@@ -163,24 +164,24 @@ Three **auth classes** cover every route: `JWT` (Supabase JWT in `Authorization:
 | `GET` | `/v1/recruiters/:id` | JWT | `RecruiterIdParams` | `RecruiterResponse` | One recruiter **with opportunities + memories** |
 | `POST` | `/v1/recruiters/:id/erase` | JWT | `RecruiterIdParams` | `204` | PII erasure — anonymize + cascade + audit (doc 11 §12); rate-limited hardest (§12) |
 | `PATCH` | `/v1/opportunities/:id` | JWT | `OpportunityPatch` | `OpportunityResponse` | Triage: `status` ∈ `new → reviewing → interested / declined / archived` |
-| `GET` | `/v1/settings` | JWT | — | `SettingsResponse` | Greeting text, screening questions, toggles (doc 01 §11) |
+| `GET` | `/v1/settings` | JWT | — | `SettingsResponse` | Greeting text, screening questions, toggles (doc 01) |
 | `PUT` | `/v1/settings` | JWT | `SettingsPut` | `SettingsResponse` | Full replace — dashboard always writes the whole document, hence PUT not PATCH |
 
 Every schema named above lives in `packages/shared/src/schemas/` (doc 03) and is imported by **both** the API (validation + serialization + OpenAPI) and the web app (typed client) — one source of shape truth.
 
-Note what is **absent**: no `POST /v1/calls` (calls are created by telephony, not the dashboard), no `DELETE` on calls or recruiters (retention is a policy in doc 11, erasure is the audited `erase` action), no user management (single tenant — Varun is provisioned in Supabase Auth directly, doc 04).
+Note what is **absent**: no `POST /v1/calls` (calls are created by Bolna's webhooks, not the dashboard), no `/voice/stream` WebSocket (the DIY audio path is gone — Bolna owns the voice stream), no `DELETE` on calls or recruiters (retention is a policy in doc 11, erasure is the audited `erase` action), no user management (single tenant — Varun is provisioned in Supabase Auth directly, doc 04).
 
 ### 3.2 Request lifecycle — where auth, validation, and errors live
 
 ```mermaid
 flowchart TB
-    REQ([Incoming request]) --> NGINX[Nginx<br/>TLS, size limits, WS upgrade]
+    REQ([Incoming request]) --> NGINX[Nginx<br/>TLS, size limits]
     NGINX --> ROUTER{Route match?}
     ROUTER -->|no| NF["our notFoundHandler<br/>→ envelope, 404"]
     ROUTER -->|/health /ready| PROBE["probe handlers<br/>no auth"] --> OK200([200])
-    ROUTER -->|/webhooks/* or /voice/stream| TOK{"token valid?<br/>constant-time compare<br/>+ IP allowlist"}
-    TOK -->|no| E401A["401 envelope<br/>WS: socket dropped"]
-    TOK -->|yes| WHV[Zod validate payload]
+    ROUTER -->|/webhooks/bolna/*| TOK{"Bearer BOLNA_WEBHOOK_TOKEN valid?<br/>constant-time compare"}
+    TOK -->|no| E401A[401 envelope]
+    TOK -->|yes| WHV["Zod validate payload<br/>(.passthrough() on vendor shapes)"]
     ROUTER -->|/v1/*| JWTC{"JWT preHandler:<br/>verify signature+exp<br/>AND sub == Varun"}
     JWTC -->|missing/invalid| E401[401 UNAUTHENTICATED]
     JWTC -->|valid, wrong user| E403[403 FORBIDDEN]
@@ -204,7 +205,7 @@ flowchart TB
     WHV --> ROUTE
 ```
 
-Read the diagram's guarantees: **no handler runs before its auth class passes**; **every failure exit converges on the same envelope**; the route → service → repository layering is doc 03 §4.1's slice, unchanged. The `setErrorHandler` is the single choke point that maps the `AppError` hierarchy (`core/errors`) to `{code, status}` — services throw domain errors and never think about HTTP.
+Read the diagram's guarantees: **no handler runs before its auth class passes**; **every failure exit converges on the same envelope**; the route → service → repository layering is doc 03's slice, unchanged. The `setErrorHandler` is the single choke point that maps the `AppError` hierarchy (`core/errors`) to `{code, status}` — services throw domain errors and never think about HTTP. One webhook nuance (doc 08): a *tool* endpoint that fails should still return a well-formed JSON error body fast, so the agent can speak a graceful fallback instead of leaving the caller in silence.
 
 ### 3.3 Illustrative Zod schemas (the pattern, three times)
 
@@ -229,10 +230,10 @@ export type CallListQuery = z.infer<typeof CallListQuery>;
 //    any DB column NOT listed here is stripped before it leaves the process.
 export const CallResponse = z.object({
   id: z.string(),
-  callSid: z.string(),                    // the correlation id (doc 01 §3.8)
+  executionId: z.string(),                // the Bolna correlation id (doc 01)
   recruiterId: z.string().uuid().nullable(),
   status: z.enum(["completed", "failed", "missed", "in_progress"]),
-  fromNumberMasked: z.string(),           // "+91••••••7842" — full number never serialized (doc 05 §12)
+  fromNumberMasked: z.string(),           // "+91••••••7842" — full number never serialized (doc 18)
   startedAt: z.string().datetime(),
   durationSeconds: z.number().int().nullable(),
   transcript: z.array(z.object({
@@ -249,7 +250,7 @@ export const CallResponse = z.object({
     urgency: z.string().nullable(),
     nextSteps: z.string().nullable(),
   }).nullable(),                          // null until generate-summary job completes
-  costUsd: z.number().nullable(),         // per-call cost (doc 00 §11)
+  costUsd: z.number().nullable(),         // per-call cost: Bolna minutes + summary tokens (doc 00)
 });
 
 // ── The one error shape (§2.5) — referenced by EVERY route's error responses in OpenAPI
@@ -263,11 +264,11 @@ export const ErrorEnvelope = z.object({
 });
 ```
 
-### 3.4 The WebSocket protocol — exactly one custom WS surface
+### 3.4 The Bolna webhook surfaces — and why there is no WebSocket at all
 
-**What we consume** — `GET /voice/stream` (upgrade) is Exotel's Voice Streaming connection, and *Exotel defines the protocol*, we implement it (doc 05 §2.4): event-typed JSON frames — `start` (call metadata: `CallSid`, from/to), `media` (base64 8 kHz audio chunks, both directions), `stop` (stream end), plus `mark`/`clear` for playback checkpoints and the barge-in flush. Auth is the `?token=VOICE_WS_AUTH_TOKEN` query parameter checked at upgrade, before any session exists (doc 05 §5.5). The doc-05 honesty rule applies with full force here: **exact field names, codec labels, and chunk framing must be verified against current Exotel docs before doc 17 implements the adapter** — this document fixes only *where* the surface lives and *how it authenticates*, never memory-based field names.
+**What Bolna calls** — the three `TOKEN`-class surfaces in the §3.1 table are *Bolna's* integration points, configured into the agent (identify URL in the inbound tab, tool URLs in each `custom_task` definition, post-call URL in the analytics tab — doc 06). Bolna defines when they fire and what they carry; doc 08 is the contract document with exact request/response shapes, the four tool JSON definitions, and error/fallback behavior. Two design rules repeat here because they shape the whole API: **budgets** (identify <500ms, tools <800ms, post-call ack <1s — a slow response degrades a live phone call) and **honesty about vendor payloads** (validate the fields we rely on with Zod, `.passthrough()` the rest, and verify exact field names against https://www.bolna.ai/docs before implementing — never from memory).
 
-**What we deliberately don't build** — the dashboard gets **no custom WebSocket**. The tempting design ("push new calls to the browser over our own WS") would mean owning connection state, reconnection, heartbeats, fan-out, and auth for a second streaming protocol. But every live update the dashboard needs — new call appears, summary lands, status changes — is *a Postgres row changing*, and **Supabase Realtime** (doc 10) already streams row changes to authenticated browsers with RLS enforcement built in. So the rule: **one custom WS surface, vendor-facing, in `features/voice/` — everything browser-facing rides Supabase Realtime.** Fewer protocols, one audited unauthenticated-inbound folder (doc 03 §12), and the whole "live dashboard" feature costs us zero server code.
+**What we deliberately don't build** — any WebSocket, anywhere. The DIY design needed one vendor-facing WS for raw audio (`/voice/stream` — retired with the pivot; preserved in `docs/phase2-diy-reference/`), and the tempting dashboard design ("push new calls to the browser over our own WS") would mean owning connection state, reconnection, heartbeats, fan-out, and auth for a streaming protocol. But Bolna owns the audio loop now, and every live update the dashboard needs — new call appears, summary lands, status changes — is *a Postgres row changing*, which **Supabase Realtime** (doc 10) already streams to authenticated browsers with RLS enforcement built in. So the rule: **the public surface is plain HTTPS; the only token-gated inbound code lives in `features/webhooks/` (doc 03); everything browser-facing rides Supabase Realtime.** Fewer protocols, one audited vendor-inbound folder, and the whole "live dashboard" feature costs us zero server code.
 
 ---
 
@@ -282,7 +283,8 @@ packages/shared/src/
 │   ├── recruiter.schema.ts        # RecruiterListQuery, RecruiterResponse (+opportunities, memories)
 │   ├── opportunity.schema.ts      # OpportunityPatch, OpportunityResponse
 │   ├── settings.schema.ts         # SettingsPut, SettingsResponse
-│   ├── webhook.schema.ts          # ExotelStatusCallback (fields from the saved webhook.site fixture, doc 05 §9.4)
+│   ├── bolna-webhook.schema.ts    # BolnaIdentifyQuery, per-tool schemas, BolnaPostCallPayload
+│   │                              #   (.passthrough(); fields from saved fixtures per doc 08 — never memory)
 │   └── error.schema.ts            # ErrorEnvelope + Cursor helpers
 └── constants/
     └── error-codes.ts             # every `code` the envelope may carry — shared with web
@@ -296,13 +298,14 @@ apps/api/src/
 │   ├── recruiters/recruiters.routes.ts   # GET list/detail + POST /:id/erase
 │   ├── opportunities/opportunities.routes.ts  # PATCH /v1/opportunities/:id
 │   ├── settings/settings.routes.ts       # GET + PUT /v1/settings
-│   └── voice/voice.routes.ts      # POST /webhooks/exotel/status + GET /voice/stream (WS)
+│   └── webhooks/                  # the three Bolna surfaces: identify, tools/*, post-call (doc 08)
 └── infra/http/
     ├── auth.prehandler.ts         # Supabase JWT verify + single-tenant check (§12)
+    ├── bolna-token.prehandler.ts  # Bearer BOLNA_WEBHOOK_TOKEN, constant-time compare (§12)
     └── swagger.ts                 # @fastify/swagger + fastify-type-provider-zod wiring
 ```
 
-The doc 03 rules hold without exception: routes import schemas from `@recruitpilot/shared` and contain **no logic**; services throw `AppError`s and know nothing of HTTP; the only unauthenticated-inbound code stays inside `features/voice/`.
+The doc 03 rules hold without exception: routes import schemas from `@recruitpilot/shared` and contain **no logic**; services throw `AppError`s and know nothing of HTTP; the only vendor-inbound code stays inside `features/webhooks/`.
 
 ---
 
@@ -310,17 +313,17 @@ The doc 03 rules hold without exception: routes import schemas from `@recruitpil
 
 No external accounts or dashboards today — this is a design document, so the manual work is **design review**. Do these on paper before doc 13:
 
-1. **Auth-class walk.** Cover the inventory table (§3.1), list all 13 routes from memory, and state each one's auth class (`JWT` / `TOKEN` / `NONE`). For each `NONE` and `TOKEN` route, say *why* it is safe to be non-JWT: `/health`/`/ready` return no data and mutate nothing (safe by construction); the webhook is token-gated + IP-allowlisted + idempotent (a forged duplicate is a no-op); the WS drops unauthenticated upgrades before a session exists. If you can't defend one, the design has a hole — find it now, not in doc 18's audit.
+1. **Auth-class walk.** Cover the inventory table (§3.1), list all 14 routes from memory (counting `tools/*` as one surface), and state each one's auth class (`JWT` / `TOKEN` / `NONE`). For each `NONE` and `TOKEN` route, say *why* it is safe to be non-JWT: `/health`/`/ready` return no data and mutate nothing (safe by construction); the three Bolna surfaces are Bearer-token-gated with a token only we and Bolna hold, the post-call handler is idempotent (a forged duplicate is a no-op), and the identify response contains only what we would let the agent speak aloud. If you can't defend one, the design has a hole — find it now, not in doc 18's audit.
 2. **Write the cursor contract by hand.** Without looking at §2.4: write the request query params, the response shape, the four rules (opacity, `nextCursor: null`, fixed sort with tiebreaker, filters-frozen-per-walk). Compare. This contract is the hardest thing to change post-launch — it must be in your fingers.
 3. **Decide and document rate-limit classes.** Fill this table in your own words, then compare with §12:
 
    | Route class | Limit | Reasoning you should reach |
    |---|---|---|
-   | Webhooks + WS (`TOKEN`) | exempt from rate limiting, but token-gated | Exotel's retry storms are *legitimate* traffic; throttling them causes duplicate-delivery cascades. The token + allowlist is the gate, not a counter. |
+   | Bolna webhooks (`TOKEN`) | exempt from rate limiting, but token-gated | Mid-call tool calls and webhook retries are *legitimate*, latency-critical traffic; throttling them breaks live calls or causes duplicate-delivery cascades. The Bearer token is the gate, not a counter. |
    | Dashboard reads/writes (`JWT`) | 100 req/min per user | One human clicking a dashboard; 100/min is invisible to Varun, a wall to a script with a stolen token. |
    | `POST /v1/recruiters/:id/erase` | 5 req/min | Destructive + irreversible + audited; nobody legitimately erases faster than this. Slow-by-design. |
 
-4. **Play "which status code?"** — a request has a valid JWT but the JSON body's `status` field says `"banana"` (422); no `Authorization` header at all (401); Varun's JWT but a second Supabase user was somehow created and calls the API (403); `GET /v1/calls/nonexistent-id` (404, *in the envelope*); Exotel re-POSTs a StatusCallback we already processed (200/204, idempotent no-op — **not** 409).
+4. **Play "which status code?"** — a request has a valid JWT but the JSON body's `status` field says `"banana"` (422); no `Authorization` header at all (401); Varun's JWT but a second Supabase user was somehow created and calls the API (403); `GET /v1/calls/nonexistent-id` (404, *in the envelope*); Bolna re-POSTs a post-call payload we already processed (200, idempotent no-op — **not** 409).
 
 ---
 
@@ -335,6 +338,9 @@ No external accounts or dashboards today — this is a design document, so the m
 | @fastify/rate-limit | https://github.com/fastify/fastify-rate-limit |
 | Zod | https://zod.dev |
 | OpenAPI specification | https://spec.openapis.org/oas/latest.html |
+| Bolna custom function calls (`custom_task`) | https://www.bolna.ai/docs/tool-calling/custom-function-calls |
+| Bolna inbound caller identification | https://www.bolna.ai/docs/customizations/identify-incoming-callers |
+| Bolna analytics tab (post-call webhook) | https://www.bolna.ai/docs/agent-setup/analytics-tab |
 | Supabase Auth JWTs (verification, JWT secret vs JWKS) | https://supabase.com/docs/guides/auth/jwts |
 | Cursor pagination explained (Slack engineering) | https://slack.engineering/evolving-api-pagination-at-slack/ |
 | Problem Details for HTTP APIs (RFC 9457 — envelope prior art) | https://www.rfc-editor.org/rfc/rfc9457 |
@@ -366,12 +372,18 @@ curl -s http://localhost:3000/v1/calls?limit=5 \
 curl -si http://localhost:3000/v1/calls | tail -n 1 | jq .
 # → { "error": { "code": "UNAUTHENTICATED", "message": "...", "requestId": "req-..." } }
 
-# 5. Webhook simulation (token in query, like Exotel will send it).
-#    Field names below come from YOUR saved webhook.site fixture (doc 05 §9.4) — not from memory:
-curl -si "http://localhost:3000/webhooks/exotel/status?token=$VOICE_WS_AUTH_TOKEN" \
+# 5. Webhook simulation (Bearer token, like Bolna will send it).
+#    Identify — the three query params are Bolna's documented contract (doc 08):
+curl -si "http://localhost:3000/webhooks/bolna/identify?contact_number=%2B919812345678&agent_id=$BOLNA_AGENT_ID&execution_id=test-exec-001" \
+  -H "Authorization: Bearer $BOLNA_WEBHOOK_TOKEN"
+# → 200 + the dynamic-variables JSON ({} of variables for an unknown caller).
+
+#    Post-call — body field names come from YOUR saved fixture (doc 08) — not from memory:
+curl -si "http://localhost:3000/webhooks/bolna/post-call" \
+  -H "Authorization: Bearer $BOLNA_WEBHOOK_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"CallSid":"test-call-001","Status":"completed","Duration":"142"}'
-# → 204. Run it AGAIN: still 204, and no duplicate jobs enqueued (idempotency, §2.6).
+  -d @docs/fixtures/bolna-post-call.json
+# → 200. Run it AGAIN: still 200, and no duplicate jobs enqueued (idempotency by execution_id, §2.6).
 
 # 6. Validation negative test — bad limit. Expect 422 with details[]:
 curl -s "http://localhost:3000/v1/calls?limit=9999" \
@@ -382,7 +394,7 @@ curl -s "http://localhost:3000/v1/calls?limit=9999" \
 
 ## 8. Environment Variables
 
-One new variable. (Everything else this document uses — `VOICE_WS_AUTH_TOKEN`, `SUPABASE_URL`, etc. — arrived in docs 04–05.)
+One new variable. (Everything else this document uses — `BOLNA_WEBHOOK_TOKEN`, `SUPABASE_URL`, etc. — arrived in docs 04–05 and 08.)
 
 | Variable | Purpose | Where used | Where stored |
 |---|---|---|---|
@@ -392,7 +404,7 @@ One new variable. (Everything else this document uses — `VOICE_WS_AUTH_TOKEN`,
 
 > **Verify before trusting this paragraph:** newer Supabase projects are moving to **asymmetric signing keys (JWKS)** instead of a shared HS256 secret. If your project's JWT Settings page shows a **JWKS URL** (`https://<ref>.supabase.co/auth/v1/.well-known/jwks.json`) or mentions RS256/ECC signing keys, **prefer JWKS verification** — the preHandler fetches (and caches) the public keys and no secret needs to live in your env at all, which is strictly better (nothing to leak, keys rotate server-side). The shared-secret flow described here is the fallback for projects where that's what the dashboard offers. Check *your* dashboard; don't assume.
 
-As always (doc 03 §8): the value goes in git-ignored `.env` + password manager; a placeholder + this comment goes in `.env.example`; the Zod env schema in `core/config/` refuses boot without it.
+As always (doc 03): the value goes in git-ignored `.env` + password manager; a placeholder + this comment goes in `.env.example`; the Zod env schema in `core/config/` refuses boot without it.
 
 ---
 
@@ -403,14 +415,15 @@ You pass this document when all of the following hold:
 1. **OpenAPI completeness** — `curl -s localhost:3000/docs/json | jq '.paths | keys'` lists every route in the §3.1 inventory (as routes are implemented in docs 16–17; the skeleton routes from doc 09 appear immediately). Any route missing from the spec means it bypassed the Zod schema wiring — which also means it has no validation. Fix, don't shrug.
 2. **Negative-path battery** — each returns the envelope with the right code: no JWT → 401; valid-signature JWT for a non-Varun user → 403; `?limit=9999` → 422 with `details[]` naming the field; unknown call id → 404; unknown *route* (`GET /v1/nope`) → 404 **in the same envelope** (this one catches the forgotten `setNotFoundHandler`).
 3. **Envelope consistency probe** — collect the JSON bodies of a 401, a 404, a 422, and a forced 500; `jq 'keys'` on each must be identical: `["error"]`, and each `.error` must contain `code`, `message`, `requestId`.
-4. **Idempotency probe** — fire the §7.5 webhook curl twice; second response is still 2xx and BullMQ shows one job set, not two (`jobId = callSid` dedupe).
+4. **Idempotency probe** — fire the §7.5 post-call curl twice; second response is still 2xx and BullMQ shows one job set, not two (`jobId = executionId` dedupe).
 5. **Self-quiz** (from memory):
    1. Why cursor pagination over offset — what specifically goes wrong on page 2 with offset when calls arrive mid-scroll?
    2. Why one error envelope, and which two Fastify defaults must be overridden to achieve it?
-   3. Which routes are public (non-JWT), and what makes each one safe anyway?
-   4. What makes the status webhook idempotent, and what key implements it?
-   5. Why does the dashboard get no custom WebSocket?
+   3. Which routes are non-JWT (the three Bolna surfaces + probes), and what makes each one safe anyway?
+   4. What makes the post-call webhook idempotent, and what key implements it?
+   5. Why does this API have no WebSocket surface at all — who owns the voice stream, and who owns the live dashboard?
    6. What's the difference between 401 and 403 in this API, concretely?
+   7. What are the three webhook response budgets, and why does a slow tool endpoint hurt a *live* phone call?
 
 ---
 
@@ -420,7 +433,7 @@ You pass this document when all of the following hold:
 2. **200-with-error-body.** `200 {"success": false, "error": ...}` breaks every piece of infrastructure that reads status codes — monitoring counts it as success, caches may store it, retry logic never fires, and clients need bespoke un-wrapping. The status code is the first truth; the envelope elaborates.
 3. **Inconsistent error shapes between validation and handler errors.** Fastify's *default* validation failure returns its own format (`{statusCode, error, message}`) — different from your handler's envelope, and its default 404 is a third shape. Clients end up parsing three formats. The fix is mechanical: `setErrorHandler` + `setNotFoundHandler` + the validator error mapping, all funneling into `ErrorEnvelope` — then verify with §9.3's probe.
 4. **Skipping response serialization schemas.** Returning the raw Prisma row "because it works" leaks every column — including internal ones you add later (cost breakdowns, provider request ids, soft-delete flags). The Zod response schema is an allowlist: fields not named do not leave the process (doc 09). No route ships without one.
-5. **Unauthenticated webhook "because the URL is obscure."** URLs leak — logs, browser history, Exotel's own dashboard, a screenshot. Obscurity is not authentication; the token + allowlist check exists because *anyone* can POST `{"Status":"completed"}` and trigger your entire async plane on a fabricated call (doc 05 §12).
+5. **Unauthenticated webhook "because the URL is obscure."** URLs leak — logs, browser history, Bolna's own dashboard, a screenshot. Obscurity is not authentication; the Bearer-token check exists because *anyone* can POST a fabricated post-call payload and trigger your entire async plane — or GET the identify endpoint and harvest recruiter memory JSON (docs 08, 18).
 6. **Offset pagination, then "why does page 2 repeat items?"** New calls arriving during scroll shift every offset — duplicates and skips are guaranteed under write load, and deep offsets get slower linearly. This is why the cursor contract is fixed *now*: retrofitting cursors after the web app ships means breaking the client.
 7. **Breaking changes inside `/v1`.** Renaming `durationSeconds` to `duration`, or making a nullable field required, silently breaks the deployed dashboard. Inside a version, changes are **additive only** (§11); a change that can't be additive is the birth of `/v2` — both served side by side until the client migrates.
 
@@ -442,9 +455,10 @@ You pass this document when all of the following hold:
 The API surface is where doc 18's audit will spend most of its time; the design bakes in the controls now:
 
 - **AuthZ beyond authN — the single-tenant check**: a valid Supabase JWT proves "Supabase issued this token", **not** "this is Varun". If sign-ups were ever accidentally enabled (doc 04), any stranger could self-register and hold a *valid* JWT. The `/v1` preHandler therefore checks two things: signature+expiry (authentication → 401) **and** `sub === VARUN_USER_ID` / an owner claim (authorization → 403). Two checks, two distinct status codes, two log lines.
-- **Constant-time token comparison**: the webhook/WS token check uses `crypto.timingSafeEqual`, not `===`. String comparison short-circuits at the first differing byte, so response-time differences leak how many leading characters an attacker has right — a timing oracle that turns a 2^256 search into a linear one. `timingSafeEqual` takes the same time regardless.
+- **Constant-time token comparison**: the Bolna webhook token check uses `crypto.timingSafeEqual`, not `===`. String comparison short-circuits at the first differing byte, so response-time differences leak how many leading characters an attacker has right — a timing oracle that turns a 2^256 search into a linear one. `timingSafeEqual` takes the same time regardless.
+- **The identify response is a serialization allowlist too**: whatever JSON we return is spoken *into a phone call* via the agent's prompt. Private notes, internal flags, and other recruiters' data must be structurally impossible to include — the response schema lists only prompt-safe fields (docs 08, 18).
 - **Recordings via short-TTL signed URLs**: `GET /v1/calls/:id/recording` never streams audio through our API and never exposes a permanent Storage URL. It asks Supabase Storage for a **signed URL with a short TTL (~5 min)** and returns that; the browser fetches directly from Storage. A leaked URL (chat paste, screenshot, log) expires before it can circulate, and the bucket itself stays private (doc 04).
-- **Rate-limit classes** (`@fastify/rate-limit`, keyed by user id for JWT routes): dashboard 100/min, `erase` 5/min, webhooks/WS exempt-but-token-gated (§5.3's reasoning). 429s return the envelope + `Retry-After`.
+- **Rate-limit classes** (`@fastify/rate-limit`, keyed by user id for JWT routes): dashboard 100/min, `erase` 5/min, Bolna webhooks exempt-but-token-gated (§5.3's reasoning). 429s return the envelope + `Retry-After`.
 - **Request size limits**: Fastify `bodyLimit` set low (e.g., 100 KB) — no dashboard write is large, and the webhook payload is tiny. An unlimited body is a free memory-exhaustion vector on a public endpoint.
 - **`requestId` instead of internals**: every error carries a `requestId` matching the Pino log line (doc 09) — full diagnostic power for you (grep one id, see the stack trace *in the logs*), zero information for an attacker (the 500 body never contains stack frames, SQL, file paths, or dependency names).
 - **Serialization as exfiltration control**: the response-schema allowlist (§10.4) means even a bug that fetches too much cannot *send* too much — masked phone numbers (`fromNumberMasked`) are the schema's shape, so the unmasked column physically cannot serialize.
@@ -453,14 +467,14 @@ The API surface is where doc 18's audit will spend most of its time; the design 
 
 ## 13. Checklist
 
-- [ ] Full endpoint inventory (§3.1) reproducible from memory — 13 routes with method + auth class
+- [ ] Full endpoint inventory (§3.1) reproducible from memory — 14 routes with method + auth class (tools/* counted as one)
 - [ ] Status-code table (§2.2) internalized; 400 vs 422 and 401 vs 403 distinctions crisp
-- [ ] `/v1` URL versioning rationale stated; header versioning rejection defensible
+- [ ] `/v1` URL versioning rationale stated; header versioning rejection defensible; why `/webhooks/bolna/*` carries no version prefix
 - [ ] Cursor contract written by hand (§5.2) and matching §2.4's four rules
 - [ ] Error envelope fields (`code`, `message`, `details?`, `requestId`) and each one's audience known
 - [ ] The two Fastify defaults to override (validation errors + not-found handler) known
-- [ ] Webhook idempotency mechanism (`CallSid` keying) understood; duplicate POST = 2xx no-op
-- [ ] One-custom-WS rule and the Supabase Realtime rationale (§3.4) understood
+- [ ] Webhook idempotency mechanism (`execution_id` keying) understood; duplicate POST = 2xx no-op
+- [ ] The three webhook budgets (identify <500ms, tools <800ms, post-call ack <1s) and the no-WebSocket rule with the Supabase Realtime rationale (§3.4) understood
 - [ ] Rate-limit classes decided and documented (§5.3 table)
 - [ ] `SUPABASE_JWT_SECRET` located in the Supabase dashboard — or JWKS URL preferred if the project offers it — and added to `.env` + `.env.example`
 - [ ] Single-tenant authZ check (JWT valid AND user is Varun) understood as distinct from authN
@@ -471,4 +485,4 @@ The API surface is where doc 18's audit will spend most of its time; the design 
 
 ## 14. Next Step
 
-Proceed to **`13_DOCKER_SETUP.md`** — packaging the monorepo for reproducible runs: multi-stage Dockerfiles for api and web, the one-image-two-entrypoints pattern (server vs worker, doc 01 §3.2), Redis in Compose, local `docker-compose.yml` vs production `docker-compose.prod.yml`, and layer-caching discipline so builds stay fast — verified by bringing the whole stack up with one command.
+Proceed to **`13_DOCKER_SETUP.md`** — packaging the monorepo for reproducible runs: multi-stage Dockerfiles for api and web, the one-image-two-entrypoints pattern (server vs worker, doc 01), Redis in Compose, local `docker-compose.yml` vs production `docker-compose.prod.yml`, and layer-caching discipline so builds stay fast — verified by bringing the whole stack up with one command.

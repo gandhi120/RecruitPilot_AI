@@ -2,7 +2,7 @@
   "name": "@recruitpilot/api",
   "version": "0.0.0",
   "private": true,
-  "description": "Fastify backend: voice gateway, agent orchestrator, REST API (docs 09, 12, 16, 17).",
+  "description": "Fastify backend: Bolna webhooks, async jobs, REST API (docs 08, 09, 12, 17).",
   "type": "module",
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=../../.env src/server.ts",

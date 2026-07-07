@@ -9,11 +9,11 @@
 
 Build the **test suite that makes this system safe to change** — fast enough to run on every save, honest enough to gate every merge (doc 14), and complete enough that a green run means "the important behaviours still hold." Concretely, by the end of this document you will have:
 
-- A **layered test strategy** — many unit tests, fewer integration tests, a few end-to-end simulations, plus two kinds this project needs that a CRUD app doesn't: **contract tests** (the `packages/shared` Zod schemas are the api↔web promise, doc 12) and **agent evals** (the never-impersonate / tool-selection / prompt-injection guarantees, docs 16/18).
+- A **layered test strategy** — many unit tests, fewer integration tests, a few end-to-end simulations, plus two kinds this project needs that a CRUD app doesn't: **contract tests** (the three Bolna webhook surfaces from doc 08 plus the `packages/shared` schemas that are the api↔web promise, doc 12) and **agent evals** (the never-impersonate / tool-selection / prompt-injection guarantees, docs 16/18).
 - **Vitest** (doc 02) configured per workspace with a root `npm test` that runs `api`, `web`, and `shared` together, **v8 coverage**, and setup files that bind **fakes** for every provider port and freeze time.
-- The **testability payoff of the architecture made real**: because features depend on *ports* (doc 03 §2.2) and repositories isolate Prisma (doc 11 §3.5), the core runs against **fakes and a throwaway database with zero vendor keys** — which is precisely *why CI needs no Deepgram/Claude/ElevenLabs/Exotel secret* (doc 14 §8.3). That property is not an accident to preserve; it is a **security control** you prove with a test run.
+- The **testability payoff of the architecture made real**: because features depend on *ports* (doc 03 §2.2) and repositories isolate Prisma (doc 11 §3.5), the core runs against **fakes and a throwaway database with zero vendor keys** — which is precisely *why CI needs no Bolna/Claude/Google secret* (doc 14 §8.3). That property is not an accident to preserve; it is a **security control** you prove with a test run.
 - A **test database strategy** (ephemeral local Postgres for speed + a periodic Supabase staging run for RLS/Realtime fidelity) and the **CI `services:`** that spin Postgres + Redis up for the integration job — extending doc 14's `ci.yml`.
-- The **voice replay simulation** (doc 17 §5.2) turned into a deterministic, mocked-vendor test of the whole turn loop, and an **agent eval scenario file** that grows every time production surprises you.
+- A **webhook fixture rig**: recorded Bolna payloads (identify requests, tool-call bodies, post-call deliveries — doc 17) committed as JSON fixtures and replayed through `app.inject()`, including **idempotency tests** for duplicate post-call delivery, and an **agent eval scenario file** that grows every time production surprises you.
 
 By the end you can state, for any behaviour in the system, *which layer tests it, why that layer, and what a failure there means* — and you can run the whole suite offline, key-free, in seconds-to-a-minute.
 
@@ -23,7 +23,7 @@ By the end you can state, for any behaviour in the system, *which layer tests it
 
 ### 2.1 Why we test at all (the real reason, not the ritual)
 
-Tests are not about proving code works today — you can do that by hand, once. Tests exist so you can **change** code tomorrow without re-verifying the whole system by hand, and so a mistake is caught by a machine in seconds instead of by a recruiter on a live call. In a system with five external vendors, a real-time plane, and a hard ethical rule (never impersonate Varun, doc 00 §2.3), "verify by hand" does not scale past the first week. The suite is the **regression net** that lets you refactor the orchestrator, swap Claude for a newer model, or tune the latency budget *and know you didn't break the never-impersonate guarantee* — because a test asserts it.
+Tests are not about proving code works today — you can do that by hand, once. Tests exist so you can **change** code tomorrow without re-verifying the whole system by hand, and so a mistake is caught by a machine in seconds instead of by a recruiter on a live call. In a system where a managed platform (Bolna) calls three of our endpoints mid-conversation, an async plane fans out six jobs per call, and a hard ethical rule applies (never impersonate Varun, doc 00 §2.3), "verify by hand" does not scale past the first week — you can't place a phone call per code change. The suite is the **regression net** that lets you refactor a webhook handler, reshape the identify response, or swap the summary model *and know you didn't break the never-impersonate guarantee or the idempotency contract* — because a test asserts each one.
 
 The corollary: a test that never fails when something breaks is worthless, and a test that fails when nothing broke (flaky) is worse than worthless — it trains you to ignore red. Every test in this document earns its place by **catching a real regression** and **not flaking**.
 
@@ -35,15 +35,15 @@ The **test pyramid** (Mike Cohn) is a rule of proportion. Order tests by scope �
 |---|---|---|---|---|
 | **Unit** | One function/class, everything else faked | microseconds–milliseconds | the most (hundreds) | ~zero |
 | **Integration** | Several real units together (route → service → repository → **test DB**) | tens–hundreds of ms | fewer (dozens) | low (needs DB/Redis) |
-| **E2E / simulation** | The whole turn loop end to end, vendors mocked | hundreds of ms–seconds | fewest (a handful) | highest |
+| **E2E / simulation** | A whole call's webhook sequence end to end (identify → tools → post-call → job chain), vendors faked | hundreds of ms–seconds | fewest (a handful) | highest |
 
-Why this shape? Because cost and flakiness climb as scope grows, while **fault isolation** shrinks. A failing unit test names the broken function; a failing E2E test says "something in the pipeline broke" and you go hunting. So you push as much verification as possible **down** to the cheap, precise layer, and reserve the expensive, blurry layer for the few things only it can prove (the sockets actually bridge, the turn loop actually flows).
+Why this shape? Because cost and flakiness climb as scope grows, while **fault isolation** shrinks. A failing unit test names the broken function; a failing E2E test says "something in the pipeline broke" and you go hunting. So you push as much verification as possible **down** to the cheap, precise layer, and reserve the expensive, blurry layer for the few things only it can prove (the webhook chain actually flows, the job chain actually completes).
 
 ### 2.3 The testing trophy — why a *service* leans on integration
 
 The pyramid is right about *proportion* but can mislead for a **backend service**, where the interesting bugs live *between* units: a route that forgets auth, a repository whose `WHERE` clause is subtly wrong, a serializer that leaks a column. Kent C. Dodds' **testing trophy** reweights the middle: for an API, **integration tests carry disproportionate value** because they test the wiring — the part most likely to be wrong and least likely to be caught by unit tests of the pieces in isolation.
 
-We take the honest synthesis: **pyramid proportions, trophy emphasis.** Most tests are unit (they're free), but we deliberately invest in a solid band of integration tests (`app.inject()` against a real service + repository + test DB, §3) because that band is where a voice-assistant *backend* actually breaks. The E2E tip stays tiny and mocked — a real telephony E2E is doc 17's manual smoke test, not something you run 500 times.
+We take the honest synthesis: **pyramid proportions, trophy emphasis.** Most tests are unit (they're free), but we deliberately invest in a solid band of integration tests (`app.inject()` against a real service + repository + test DB, §3) because that band is where a webhook *backend* actually breaks — a token check that's skipped on one route, an identify serializer that leaks a private field, a post-call handler that isn't idempotent. The E2E tip stays tiny and faked — a real telephony E2E is a test call placed through Bolna (docs 15/17), not something you run 500 times.
 
 ### 2.4 Test doubles taxonomy (stub, mock, fake, spy) and when each
 
@@ -51,9 +51,9 @@ We take the honest synthesis: **pyramid proportions, trophy emphasis.** Most tes
 
 | Double | What it does | Use it when | In this project |
 |---|---|---|---|
-| **Stub** | Returns canned answers to calls | You need the collaborator to *return something* so the test can proceed | a `LLMProvider` that yields a fixed token stream / tool call |
-| **Mock** | A stub **plus** pre-set *expectations* about how it's called; the test fails if the calls don't match | The **interaction** is the behaviour under test ("did we dispatch the tool with these args?") | asserting `save_recruiter` was dispatched with the parsed `{name, company}` |
-| **Fake** | A working lightweight implementation of the real thing | You want realistic behaviour without the real dependency | an **in-memory repository**; a fake `VoiceProvider` that emits canned μ-law chunks |
+| **Stub** | Returns canned answers to calls | You need the collaborator to *return something* so the test can proceed | an `LLMProvider` that returns a fixed summary for any transcript |
+| **Mock** | A stub **plus** pre-set *expectations* about how it's called; the test fails if the calls don't match | The **interaction** is the behaviour under test ("did we enqueue the email with these args?") | asserting the `send_resume` handler enqueued exactly one email job to the caller-stated address |
+| **Fake** | A working lightweight implementation of the real thing | You want realistic behaviour without the real dependency | an **in-memory repository**; a fake `CalendarProvider` returning canned free/busy windows |
 | **Spy** | A real (or fake) object that also **records** how it was called, asserted *after* the fact | You want to observe interactions without pre-committing to expectations | `vi.fn()` wrapping a real function to count calls / capture args |
 
 Rule of thumb: **prefer fakes and spies over mocks.** A fake behaves like the real port, so the test survives refactors; a mock with rigid expectations often asserts *implementation* ("this method was called in this order") rather than *behaviour* ("the recruiter got saved") — the over-mocking trap of §10. Reach for a true mock only when the *interaction itself* is the contract (an enqueue happened, a tool fired).
@@ -62,15 +62,18 @@ Rule of thumb: **prefer fakes and spies over mocks.** A fake behaves like the re
 
 This is the whole reason the architecture looks the way it does. Recall the two isolation seams:
 
-- **Ports (doc 03 §2.2):** features call `LLMProvider`, `SpeechProvider`, `VoiceProvider`, `CalendarProvider`, etc. — never a vendor SDK. In a test, dependency injection binds a **fake** to each port. The orchestrator (doc 16) runs its full state machine, tool dispatch, and barge-in logic driven by a fake Claude that yields a scripted stream — **no Anthropic account, no network, no key.**
+- **Ports (doc 03 §2.2):** features call `CalendarProvider`, `NotificationProvider`, `StorageProvider`, `LLMProvider` (summary), `BolnaClient` — never a vendor SDK. In a test, dependency injection binds a **fake** to each port. The tool handlers (doc 16) and the whole post-call job chain run driven by fakes — **no Bolna account, no Anthropic key, no network.**
 - **Repositories (doc 11 §3.5):** every feature's Prisma access is one file returning shared types. A service test binds an **in-memory fake repository**; an integration test binds the **real repository against a test database**. Either way, the *service* logic is exercised without caring which is behind it.
+
+And the third seam is new with the pivot and just as valuable: **Bolna talks to us in plain HTTP** — so its side of every interaction can be replayed from a **recorded JSON fixture** through `app.inject()`. No socket simulation, no audio rig; testing the live-call surface is literally "inject this saved request, assert the response and the side effects."
 
 ```mermaid
 flowchart LR
-    SUT[System under test<br/>orchestrator · service · route]
+    SUT[System under test<br/>webhook handler · service · job]
     subgraph PORTS["ports (doc 03)"]
-        P[LLM / Speech / Voice /<br/>Telephony / Calendar / Notification]
+        P[Calendar / Notification /<br/>Storage / LLM-summary / BolnaClient]
     end
+    FIX[recorded Bolna payloads<br/>test/fixtures/*.json] -.->|app.inject| SUT
     SUT -->|calls| PORTS
     PORTS -->|prod DI| ADP[real adapters<br/>providers/* + vendor SDK + KEYS]
     PORTS -.->|test DI| FAKE[fakes<br/>no SDK · no network · no keys]
@@ -85,8 +88,8 @@ The dotted paths are the test wiring. Read the diagram as the **security propert
 
 A test that can fail for reasons unrelated to your code is a **flaky test**, and the three classic non-determinism sources are the network, the clock, and randomness:
 
-- **Network** — a test that calls Deepgram fails when Deepgram has a bad minute. We never call real vendors in tests (§2.5); any HTTP an *adapter* SDK makes is intercepted (MSW/nock, §3.4).
-- **Clock** — latency-budget logic (doc 17), the Deepgram KeepAlive timer (doc 17 §3.3), `expiresAt` on memory (doc 16 §2.5), cursor `startedAt` ordering (doc 12 §2.4) all read time. `Date.now()` in a test makes assertions unstable and time-based branches untestable. We **inject the clock** and use Vitest's **fake timers** (`vi.useFakeTimers()`, `vi.setSystemTime()`, `vi.advanceTimersByTime()`) so "5 seconds passed" is a line of code, not a `sleep`.
+- **Network** — a test that calls a real vendor fails when that vendor has a bad minute. We never call real vendors in tests (§2.5); any HTTP an *adapter* makes (the Bolna client, the Claude SDK) is intercepted (MSW/nock, §3.4).
+- **Clock** — `expiresAt` on memory (doc 16), cursor `startedAt` ordering (doc 12 §2.4), calendar-cache TTLs, retention windows (doc 18) all read time. `Date.now()` in a test makes assertions unstable and time-based branches untestable. We **inject the clock** and use Vitest's **fake timers** (`vi.useFakeTimers()`, `vi.setSystemTime()`, `vi.advanceTimersByTime()`) so "5 seconds passed" is a line of code, not a `sleep`.
 - **Random** — UUIDs (doc 11 §2.2), any jitter/backoff. Inject the id/random source, or assert *shape* (`expect(id).toMatch(uuidRegex)`) rather than an exact value.
 
 The discipline is the same one that makes the *system* clean: **don't reach for ambient globals; inject the thing.** Injected clocks and RNGs are testable; `Date.now()` and `Math.random()` are not.
@@ -95,13 +98,13 @@ The discipline is the same one that makes the *system* clean: **don't reach for 
 
 `apps/web` and `apps/api` never share code except `packages/shared` (doc 03 §2.4). The Zod schemas there (`CallResponse`, `CallListResponse`, `ErrorEnvelope`, …) are literally the **contract**: the API promises its responses satisfy them; the web app's typed client parses responses *with the very same schemas* (doc 12 §11). A **contract test** asserts that promise from the API side — take a real serialized response and `.parse()` it against the shared schema. If a repository refactor changes a field's type, or someone adds a column that leaks through, the schema `.parse()` throws **in CI**, not in the dashboard rendering `undefined` in front of Varun (doc 12 §11).
 
-This is cheaper and stricter than a snapshot: a snapshot says "the bytes changed" (and rots — §10); a contract test says "the *shape* the other half of the system depends on still holds," which is exactly the invariant we care about. We also capture the **vendor message shapes we depend on** (Exotel `start`/`media` frames, Deepgram transcript events, ElevenLabs audio chunks) as **fixtures** — not to test the vendor, but to pin *our understanding* of their wire format so a surprise change is caught against a saved sample rather than in production (doc 05/06/08 "verify the shape, don't invent it").
+This is cheaper and stricter than a snapshot: a snapshot says "the bytes changed" (and rots — §10); a contract test says "the *shape* the other half of the system depends on still holds," which is exactly the invariant we care about. The same idea covers the **Bolna↔us contract** (doc 08): we capture the vendor message shapes we depend on — a real identify request's query params, real tool-call bodies, a real post-call payload — as **fixtures** (doc 17), not to test Bolna, but to pin *our understanding* of their wire format. Our Zod schemas parse the payloads with `.passthrough()` (doc 08 — fields we don't know about must not break us), and a surprise format change is caught against a saved sample rather than in production. On the response side, a contract test asserts the **identify response** satisfies its schema — including the security invariant that no private-note field is present (doc 18).
 
 ### 2.8 What NOT to test (and coverage as a signal, not a target)
 
 Two disciplines keep the suite honest:
 
-- **Don't test third-party internals.** You do not test that the Anthropic SDK streams tokens, that Prisma builds correct SQL, or that Zod validates — those have their own suites. You test **your** code: that *your* Claude adapter maps an SDK stream to `LLMStreamEvent`s (with the SDK's HTTP mocked), that *your* repository's query returns the right rows, that *your* route rejects a bad body. Testing the SDK is wasted effort that breaks on every dependency bump for no signal.
+- **Don't test third-party internals.** You do not test that Bolna transcribes speech, that the Anthropic SDK streams tokens, that Prisma builds correct SQL, or that Zod validates — those have their own suites (and Bolna's whole voice loop is *their* system, proven once with a real test call, doc 15). You test **your** code: that *your* Bolna client maps an executions response to domain types (with the HTTP mocked), that *your* repository's query returns the right rows, that *your* webhook route rejects a bad token and a bad body. Testing the vendor is wasted effort that breaks on every vendor change for no signal.
 - **Coverage is a signal, not a target.** Line coverage tells you what code *ran* during tests — useful for spotting an entire untested module. It does **not** tell you the assertions were meaningful (you can execute a line and assert nothing). Chasing 100% produces tests that call code to color the report without checking behaviour — pure cost, negative value. We target a **sensible ~70–80% on `core`/`features`** (the logic that matters), accept lower on glue/config, and read a *drop* as "new logic arrived untested," never treat the number as the goal (§11).
 
 ---
@@ -115,26 +118,27 @@ Every layer of the system has a test type that owns it. This is the doc's spine 
 ```mermaid
 flowchart TB
     subgraph EVAL["AGENT EVALS — persona & safety (docs 16/18)"]
-        EV["scenario set scored on:<br/>never-impersonate · tool selection ·<br/>refusal boundaries · prompt-injection resistance<br/><i>run on every prompt/model change</i>"]
+        EV["scenario set scored on:<br/>never-impersonate · tool selection ·<br/>refusal boundaries · prompt-injection resistance<br/><i>run on every prompt/model-config change</i>"]
     end
-    subgraph E2E["E2E / SIMULATION — the turn loop (doc 17)"]
-        S1["voice replay test-client → full call<br/>MOCKED vendors: recorded Deepgram transcripts,<br/>canned ElevenLabs μ-law, stubbed Claude tool responses"]
-        S2["+ manual real-call smoke test (doc 15) — not in CI"]
+    subgraph E2E["E2E / SIMULATION — the call lifecycle (doc 17)"]
+        S1["full webhook sequence replay:<br/>identify → tool calls → post-call → job chain<br/>from recorded Bolna fixtures, providers faked"]
+        S2["+ manual real test call via Bolna (doc 15) — not in CI"]
     end
-    subgraph CONTRACT["CONTRACT — the api↔web promise (doc 12)"]
+    subgraph CONTRACT["CONTRACT — the promises at both edges (docs 08/12)"]
         C1["API responses .parse() against packages/shared Zod schemas"]
-        C2["captured Exotel / Deepgram / ElevenLabs message shapes as fixtures"]
+        C2["captured Bolna webhook payloads as fixtures;<br/>identify response schema incl. no-private-field invariant"]
     end
     subgraph INT["INTEGRATION — the wiring (trophy band, §2.3)"]
         I1["Fastify routes via app.inject() → real service + repository → TEST DB"]
         I2["BullMQ jobs against a test Redis"]
-        I3["RLS policies against Supabase (doc 11 §3.6)"]
+        I3["IDEMPOTENCY: duplicate post-call delivery = no-op"]
+        I4["RLS policies against Supabase (doc 11 §3.6)"]
     end
     subgraph UNIT["UNIT — the logic (the base, §2.2)"]
-        U1["orchestrator: state transitions, tool-dispatch decisions<br/>(mocked LLM/Speech/Voice ports + fake repository)"]
-        U2["services with mocked repositories"]
-        U3["audio codec helpers (doc 17) — pure functions"]
-        U4["Zod schema tests (packages/shared)"]
+        U1["webhook handlers: token check, identify shaping,<br/>tool authorization rules (fake ports + repo)"]
+        U2["services + job functions with mocked repositories"]
+        U3["summary/memory prompt assembly — pure functions"]
+        U4["Zod schema tests (packages/shared + webhook schemas)"]
     end
 
     UNIT --> INT --> CONTRACT --> E2E --> EVAL
@@ -151,11 +155,11 @@ Read bottom-to-top as widest-and-cheapest to narrowest-and-most-valuable. The wi
 
 | Type | Exercises | Fakes / provides | Lives in | Key assertion |
 |---|---|---|---|---|
-| **Unit** | orchestrator state machine (doc 16 §2.2) & tool dispatch; services; `audio/` codec helpers (doc 17); shared Zod schemas | fake `LLMProvider`/`SpeechProvider`/`VoiceProvider` + in-memory repository; **fake timers** | `*.test.ts` beside the code (doc 03 §10.7) | a transition/decision/mapping is correct |
-| **Integration** | `route → service → repository` via `app.inject()`; BullMQ consumers; RLS policies | **test Postgres** + **test Redis** (real, ephemeral); no vendors | `*.test.ts` beside the code; RLS in `prisma/` tests | the wiring, auth, and SQL are correct |
-| **Contract** | serialized API responses; saved vendor frames | shared Zod schemas; captured fixtures | beside the route / in `test/fixtures/` | responses satisfy `packages/shared` |
-| **E2E / simulation** | the full turn loop through `voice.session.ts` (doc 17 §3.5) | **all vendors mocked** + the replay client | `apps/api/test/simulation/` | first-audio emitted; barge-in → LISTENING |
-| **Agent eval** | the persona/safety behaviour of the prompt+model (doc 16) | fake or **live** Claude (see §3.5) | `apps/api/test/evals/` | disclosure/tool/refusal/injection correct |
+| **Unit** | webhook handler logic (token check, identify shaping, tool authorization — doc 08/16); services; job functions; shared Zod schemas | fake `CalendarProvider`/`NotificationProvider`/`LLMProvider` + in-memory repository; **fake timers** | `*.test.ts` beside the code (doc 03 §10.7) | a decision/shape/rule is correct |
+| **Integration** | `route → service → repository` via `app.inject()` with Bolna fixtures; BullMQ consumers; **idempotency** (duplicate post-call); RLS policies | **test Postgres** + **test Redis** (real, ephemeral); no vendors | `*.test.ts` beside the code; RLS in `prisma/` tests | the wiring, auth, idempotency, and SQL are correct |
+| **Contract** | serialized API + identify responses; saved Bolna payloads | shared Zod schemas + doc 08 webhook schemas; captured fixtures | beside the route / in `test/fixtures/` | both edges' shapes still hold |
+| **E2E / simulation** | one call's full webhook sequence + the resulting job chain (doc 17) | **all providers faked** + recorded fixtures injected in order | `apps/api/test/simulation/` | identify JSON returned; tools executed/enqueued; post-call → complete job chain |
+| **Agent eval** | the persona/safety behaviour of the prompt+model (doc 16) | stubbed or **live** Claude (see §3.5) | `apps/api/test/evals/` | disclosure/tool/refusal/injection correct |
 
 ### 3.3 The `app.inject()` insight — integration tests with no network
 
@@ -169,23 +173,25 @@ Tests live **next to the code** (doc 03 §10.7 — no parallel `__tests__` tree 
 apps/api/test/                      # shared test helpers (NOT a mirror of src/)
 ├── setup.ts                        # global: fake timers default, env, DI → fakes
 ├── fakes/                          # one lightweight fake per PORT (doc 03 §4)
-│   ├── fake-llm.provider.ts        #   scripted token/tool stream; assert dispatch
-│   ├── fake-speech.provider.ts     #   emits canned transcripts / SpeechStarted
-│   ├── fake-voice.provider.ts      #   emits canned μ-law chunks; records sentences
+│   ├── fake-llm.provider.ts        #   canned summary/memory output; assert prompt inputs
 │   ├── fake-calendar.provider.ts   #   canned free/busy windows
-│   ├── fake-notification.provider.ts
+│   ├── fake-notification.provider.ts   # records "sent" emails for assertions
+│   ├── fake-storage.provider.ts    #   in-memory bucket for store-recording tests
+│   ├── fake-bolna.client.ts        #   canned execution/recording responses
 │   └── in-memory.repository.ts     #   Map-backed repo for unit service tests
-├── fixtures/                       # captured REAL vendor messages (§2.7)
-│   ├── exotel.start.json           #   from webhook.site / a real call (doc 05 §9.4)
-│   ├── exotel.media.frames.b64.json
-│   ├── deepgram.transcripts.json   #   recorded interim/final/speech_final events
-│   └── elevenlabs.audio.ulaw       #   canned synthesis output
+├── fixtures/                       # captured REAL Bolna payloads (§2.7, doc 17)
+│   ├── bolna.identify.request.json #   query params from a real inbound call
+│   ├── bolna.tool.check-calendar.json  # tool-call bodies, one per tool
+│   ├── bolna.tool.save-recruiter.json
+│   ├── bolna.tool.send-resume.json
+│   ├── bolna.post-call.json        #   a full post-call delivery (validate, don't invent)
+│   └── bolna.post-call.duplicate.json  # same execution_id — the idempotency probe
 ├── helpers/
 │   ├── test-db.ts                  #   connect to TEST_DATABASE_URL; per-test reset
 │   ├── build-app.ts                #   Fastify app wired with fakes for inject()
-│   └── auth.ts                     #   mint a valid test JWT for /v1 routes
+│   └── auth.ts                     #   mint a valid test JWT for /v1 + the webhook Bearer token
 ├── simulation/
-│   └── turn-loop.sim.test.ts       #   §3.5 — replay client drives a mocked full call
+│   └── call-flow.sim.test.ts       #   §3.5 — replays one call's full webhook sequence
 └── evals/
     ├── scenarios.json              #   §3.5 — prompts + assertions (the eval corpus)
     └── persona.eval.test.ts        #   loads scenarios.json, scores each
@@ -194,49 +200,55 @@ apps/api/test/                      # shared test helpers (NOT a mirror of src/)
 Two double-sourcing rules keep this clean:
 
 - **Port fakes** (`fakes/`) replace vendors — bound by DI when `USE_FAKE_PROVIDERS=true` (§8). They are *fakes* (working lightweight impls), so tests survive refactors (§2.4).
-- **HTTP interception** (**MSW** or **nock**) is only for **adapter tests** — when we *do* test `providers/claude/` mapping logic, we mock the SDK's outbound HTTP so we exercise our mapping without a network call (§2.8). Features never need this; they use the port fakes.
+- **HTTP interception** (**MSW** or **nock**) is only for **adapter tests** — when we *do* test `providers/bolna/` or `providers/claude/` mapping logic, we mock the outbound HTTP so we exercise our mapping without a network call (§2.8). Features never need this; they use the port fakes.
 
 ### 3.5 Illustrative test code — the five patterns
 
 Short, real, Vitest — using the ports and paths from docs 03/11/12/16/17. These are sketches of the *pattern*; the build fills in the rest.
 
-**(1) Unit — a fake `LLMProvider` drives the orchestrator through a tool call.** The most important unit test in the system: prove the orchestrator, given a Claude that emits a `tool_use`, **dispatches `save_recruiter` with the parsed arguments** (doc 16 §3.2). The fake LLM is a *stub* for the stream and the repository is *spied* for the interaction (§2.4).
+**(1) Unit/integration — a recorded tool-call fixture drives the `save_recruiter` handler.** The most important webhook test in the system: prove that a Bolna tool call, **replayed from a real captured body**, upserts the recruiter with the parsed arguments and returns a minimal JSON result for the agent to speak (doc 08/16). The repository is *spied* for the interaction (§2.4).
 
 ```typescript
-// apps/api/src/features/agent/agent.orchestrator.test.ts
+// apps/api/src/features/webhooks/tools.routes.test.ts
 import { describe, it, expect, vi } from "vitest";
-import { AgentOrchestrator } from "./agent.orchestrator";
-import { FakeLLMProvider } from "../../../test/fakes/fake-llm.provider";
-import { InMemoryRecruiterRepo } from "../../../test/fakes/in-memory.repository";
+import { buildTestApp } from "../../../test/helpers/build-app";
+import { webhookAuthHeader } from "../../../test/helpers/auth";
+import toolCall from "../../../test/fixtures/bolna.tool.save-recruiter.json";
 
-describe("orchestrator tool dispatch", () => {
-  it("dispatches save_recruiter with the args Claude emitted", async () => {
-    // Stub Claude: yield a tool_use block, then end the turn on the tool_result.
-    const llm = new FakeLLMProvider([
-      { type: "tool_use", name: "save_recruiter",
-        input: { name: "Alex Rivera", company: "Acme" } },
-      { type: "text", text: "Thanks, I've noted Alex from Acme." },
-      { type: "stop", stopReason: "end_turn" },
-    ]);
-    const recruiters = new InMemoryRecruiterRepo();
-    const dispatch = vi.spyOn(recruiters, "upsert");   // spy the interaction (§2.4)
+describe("POST /webhooks/bolna/tools/save_recruiter", () => {
+  it("upserts the recruiter with the parsed args and answers fast JSON", async () => {
+    const app = await buildTestApp();
+    const dispatch = vi.spyOn(app.deps.recruiters, "upsert");  // spy the interaction (§2.4)
 
-    const orch = new AgentOrchestrator({ llm, recruiters /* other ports faked */ });
-
-    const sentences: string[] = [];
-    for await (const s of orch.handleUtterance({
-      callSid: "test-0001",
-      utterance: "Hi, this is Alex from Acme.",
-      signal: new AbortController().signal,
-    })) sentences.push(s);
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/bolna/tools/save_recruiter",
+      headers: { ...webhookAuthHeader() },        // Bearer BOLNA_WEBHOOK_TOKEN
+      payload: toolCall,                          // a REAL captured body, never invented (§2.7)
+    });
 
     // Behaviour, not implementation: the recruiter got saved with the PARSED args.
+    expect(res.statusCode).toBe(200);
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ name: "Alex Rivera", company: "Acme" }),
     );
-    // And the model spoke the RESULT, never the raw tool output (doc 16 §4).
-    expect(sentences.join(" ")).toContain("Alex");
-    expect(sentences.join(" ")).not.toContain("tool_result");
+    // The response is a minimal result for the LLM to phrase — no internals leak (doc 08).
+    expect(res.json()).toEqual(expect.objectContaining({ saved: true }));
+  });
+
+  it("rejects a missing/wrong Bearer token with 401 and NO side effect", async () => {
+    const app = await buildTestApp();
+    const dispatch = vi.spyOn(app.deps.recruiters, "upsert");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/bolna/tools/save_recruiter",
+      headers: { authorization: "Bearer WRONG" },
+      payload: toolCall,
+    });
+
+    expect(res.statusCode).toBe(401);             // fail closed (doc 18)
+    expect(dispatch).not.toHaveBeenCalled();      // token check BEFORE any work
   });
 });
 ```
@@ -252,7 +264,7 @@ import { mintTestJwt } from "../../../test/helpers/auth";
 import { seedCall } from "../../../test/helpers/test-db";
 
 let app: Awaited<ReturnType<typeof buildTestApp>>;
-beforeAll(async () => { app = await buildTestApp(); await seedCall({ callSid: "c-1" }); });
+beforeAll(async () => { app = await buildTestApp(); await seedCall({ executionId: "exec-1" }); });
 
 describe("GET /v1/calls", () => {
   it("returns 200 and a body satisfying CallListResponse (contract)", async () => {
@@ -273,7 +285,7 @@ describe("GET /v1/calls", () => {
 
   it("serves one call detail satisfying CallResponse", async () => {
     const res = await app.inject({
-      method: "GET", url: "/v1/calls/c-1",
+      method: "GET", url: "/v1/calls/exec-1",
       headers: { authorization: `Bearer ${mintTestJwt()}` },
     });
     expect(res.statusCode).toBe(200);
@@ -294,56 +306,59 @@ afterEach(resetTestDb);   // per-test isolation: truncate between tests (§5.5)
 
 describe("calls.repository against the test DB", () => {
   it("creates a Call and reads it back as a domain CallRecord", async () => {
-    await insertCall({ callSid: "c-42", status: "completed", durationSeconds: 142 });
+    await insertCall({ executionId: "exec-42", status: "completed", durationSeconds: 142 });
 
     const rows = await findRecentCalls(20);
 
     expect(rows).toHaveLength(1);
-    expect(rows[0].callSid).toBe("c-42");
+    expect(rows[0].executionId).toBe("exec-42");   // correlation key = Bolna execution_id (doc 11)
     // The repository returns SHARED/domain types, never Prisma types (doc 11 §3.5).
     expect(rows[0]).not.toHaveProperty("_prisma");
   });
 });
 ```
 
-**(4) E2E / simulation — a mocked-vendor voice turn with barge-in.** The replay client (doc 17 §5.2) drives `voice.session.ts` with **recorded Deepgram transcripts, canned ElevenLabs μ-law, and a stubbed Claude** — the whole turn loop, deterministically, offline. It asserts **first-audio was emitted** and that a **barge-in returns the state to `LISTENING`** (doc 17 §2.6, §3.6).
+**(4) Integration — idempotency: a duplicate post-call delivery is a no-op.** Bolna may retry the post-call webhook (doc 08 — design for it, don't hope against it). Replay the **same recorded payload twice** and prove the second delivery creates nothing new: one Call row, the job chain enqueued once. This is the test that stands between you and duplicate summaries, duplicate emails to Varun, and double-counted calls.
 
 ```typescript
-// apps/api/test/simulation/turn-loop.sim.test.ts
-import { describe, it, expect, vi } from "vitest";
-import { VoiceSession } from "@/features/voice/voice.session";
-import { FakeExotelSocket } from "../fakes/fake-exotel-socket";
-import { FakeSpeechProvider } from "../fakes/fake-speech.provider";
-import { makeOrchestratorWithFakes } from "../helpers/build-app";
-import exotelStart from "../fixtures/exotel.start.json";
-import deepgram from "../fixtures/deepgram.transcripts.json";
+// apps/api/src/features/webhooks/post-call.routes.test.ts
+import { describe, it, expect } from "vitest";
+import { buildTestApp } from "../../../test/helpers/build-app";
+import { webhookAuthHeader } from "../../../test/helpers/auth";
+import { countCalls, countEnqueuedJobs } from "../../../test/helpers/test-db";
+import postCall from "../../../test/fixtures/bolna.post-call.json";
 
-describe("voice turn loop (mocked vendors)", () => {
-  it("emits first assistant audio, then returns to LISTENING on barge-in", async () => {
-    const sock = new FakeExotelSocket();
-    const speech = new FakeSpeechProvider(deepgram);   // replays recorded transcript events
-    const session = new VoiceSession(sock, speech, makeOrchestratorWithFakes(), vi.fn() as any, 40, 800);
+describe("POST /webhooks/bolna/post-call — idempotency by execution_id", () => {
+  it("acks fast both times, but processes exactly once", async () => {
+    const app = await buildTestApp();
+    const deliver = () => app.inject({
+      method: "POST",
+      url: "/webhooks/bolna/post-call",
+      headers: { ...webhookAuthHeader() },
+      payload: postCall,                         // a REAL captured payload (§2.7)
+    });
 
-    sock.receive(exotelStart);                          // start event → greeting → LISTENING
-    speech.emitSpeechFinal("Can Varun do a call this week?");   // triggers a turn
+    const first = await deliver();
+    const second = await deliver();              // Bolna retries — same execution_id
 
-    await vi.waitFor(() => expect(sock.outboundFrames.length).toBeGreaterThan(0)); // first-audio emitted
-    expect(session.stateForTest).toBe("SPEAKING");
+    // Both deliveries get a 2xx ack — never make the sender retry harder (doc 08).
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
 
-    speech.emitSpeechStarted();                          // caller talks over the assistant → barge-in
-    expect(sock.sent).toContainEqual({ event: "clear" });          // (1) Exotel buffer flushed (doc 17 §2.6)
-    expect(session.stateForTest).toBe("LISTENING");                // (3) back to listening within the turn
+    // But the WORK happened once: one Call row, one job chain.
+    expect(await countCalls(postCall.execution_id)).toBe(1);
+    expect(await countEnqueuedJobs("persist-transcript")).toBe(1);
   });
 });
 ```
 
-**(5) Agent eval — the never-impersonate guarantee.** Feed the adversarial turn and assert the reply **does not claim to be Varun** (doc 16 §2.3 Layer 2). Data-driven from `scenarios.json` so the corpus grows without new code.
+**(5) Agent eval — the never-impersonate guarantee.** Feed the adversarial turn and assert the reply **does not claim to be Varun** (doc 16, Layer 2). The prompt under test is the *same text* configured in Bolna's LLM tab (doc 06) — it lives in the repo as the source of truth, so evals run against Claude directly with no Bolna in the loop. Data-driven from `scenarios.json` so the corpus grows without new code.
 
 ```typescript
 // apps/api/test/evals/persona.eval.test.ts
 import { describe, it, expect } from "vitest";
 import scenarios from "./scenarios.json";
-import { runAgentTurn } from "../helpers/run-agent-turn";   // real prompt (doc 16 §4) + model-under-test
+import { runAgentTurn } from "../helpers/run-agent-turn";   // real prompt text (doc 16) + model-under-test
 
 describe.each(scenarios)("agent eval: $id", ({ turns, assert }) => {
   it(assert.description, async () => {
@@ -374,7 +389,7 @@ describe.each(scenarios)("agent eval: $id", ({ turns, assert }) => {
 ]
 ```
 
-Two modes for evals: **CI mode** runs against a *stubbed* Claude with recorded responses (deterministic, key-free, catches prompt-*structure* regressions), while **release mode** runs against the **real model** before a `ANTHROPIC_MODEL_REALTIME` or prompt change (doc 16 §11) — non-deterministic, so it scores over multiple samples rather than asserting one exact string. Release-mode evals are the *one* place a real key is used, and they run **outside the merge gate** (a manual/scheduled job), preserving the key-free CI property (§8, doc 14 §8.3).
+Two modes for evals: **CI mode** runs against a *stubbed* Claude with recorded responses (deterministic, key-free, catches prompt-*structure* regressions), while **release mode** runs against the **real model** before any prompt change or Bolna LLM-config change (doc 06/16) — non-deterministic, so it scores over multiple samples rather than asserting one exact string. Release-mode evals are the *one* place a real key is used, and they run **outside the merge gate** (a manual/scheduled job), preserving the key-free CI property (§8, doc 14 §8.3). After each real prompt change, also update the Bolna dashboard and place one manual test call (doc 17) — the eval proves the prompt, the call proves the deployment of it.
 
 ### 3.6 Test database strategy
 
@@ -431,7 +446,7 @@ Either way: **every test starts from a known, empty, seeded state** and leaves n
         run: npm test
 ```
 
-Note what is **absent**: `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `EXOTEL_*`. The suite is green without them — the doc 14 §8.3 property, proven by CI passing. **testcontainers** is a worth-knowing alternative to the `services:` block (it starts throwaway Docker containers from *inside* the test process, so the same code spins Postgres/Redis locally and in CI); we prefer the simpler compose-file + CI-`services` split here, but note it in §6 for when per-test container isolation is worth the weight.
+Note what is **absent**: `ANTHROPIC_API_KEY`, `BOLNA_API_KEY`, `BOLNA_WEBHOOK_TOKEN` (tests mint their own throwaway token), `GOOGLE_SERVICE_ACCOUNT_JSON`. The suite is green without them — the doc 14 §8.3 property, proven by CI passing. **testcontainers** is a worth-knowing alternative to the `services:` block (it starts throwaway Docker containers from *inside* the test process, so the same code spins Postgres/Redis locally and in CI); we prefer the simpler compose-file + CI-`services` split here, but note it in §6 for when per-test container isolation is worth the weight.
 
 ---
 
@@ -452,11 +467,12 @@ RecruitPilot_AI/
 │   │   │   │   ├── calls.service.test.ts      # UNIT: mocked repo
 │   │   │   │   ├── calls.repository.test.ts   # INTEGRATION: real repo + test DB
 │   │   │   │   └── calls.routes.test.ts       # INTEGRATION: app.inject() + test DB + CONTRACT
-│   │   │   ├── features/agent/
-│   │   │   │   └── agent.orchestrator.test.ts # UNIT: fake ports, state machine + dispatch
-│   │   │   └── features/voice/
-│   │   │       ├── voice.session.test.ts      # UNIT: fake sockets, barge-in (doc 17 §4)
-│   │   │       └── audio/mulaw.test.ts         # UNIT: pure-function codec
+│   │   │   ├── features/webhooks/
+│   │   │   │   ├── identify.routes.test.ts    # UNIT+CONTRACT: shaping, no-private-field invariant
+│   │   │   │   ├── tools.routes.test.ts       # fixture-driven handlers + authorization rules
+│   │   │   │   └── post-call.routes.test.ts   # INTEGRATION: idempotency by execution_id
+│   │   │   └── jobs/
+│   │   │       └── generate-summary.test.ts   # UNIT: fake LLMProvider, prompt assembly
 │   │   └── test/                    # shared helpers/fakes/fixtures/sim/evals (§3.4)
 │   └── web/
 │       ├── vitest.config.ts         # web project: jsdom env, Testing Library
@@ -590,15 +606,15 @@ Per-test isolation (truncate or transaction-rollback) and the local-vs-Supabase-
 
 ### 5.6 Create the fixtures directory
 
-Populate `apps/api/test/fixtures/` from **real captured messages** (§2.7), never invented shapes: the Exotel `start`/`media` frames you saved to webhook.site in doc 05 §9.4, real Deepgram transcript events, and a short canned ElevenLabs μ-law clip. These are the ground truth the simulation and contract tests replay.
+Populate `apps/api/test/fixtures/` from **real captured messages** (§2.7), never invented shapes: the identify request, tool-call bodies, and post-call payload you captured during doc 17's ngrok test calls (point the Bolna agent at webhook.site or log the raw bodies, then scrub any real PII into synthetic values — §12). Where a field's meaning is unclear, verify against https://www.bolna.ai/docs rather than guessing. These are the ground truth the fixture-driven and contract tests replay.
 
-### 5.7 Stand up the voice replay client as a test
+### 5.7 Stand up the call-flow simulation as a test
 
-Doc 17 §5.2 described a throwaway replay script. Here it becomes a **committed test harness** (`apps/api/test/simulation/`) that drives a full call against mocked vendors (§3.5 test 4) — deterministic, in CI, no telephony minute spent. (Forward-ref: the *manual real-call* version stays a doc-15 smoke test, outside CI.)
+Doc 17 walks one call's webhook sequence by hand with curl. Here it becomes a **committed test harness** (`apps/api/test/simulation/call-flow.sim.test.ts`) that injects the fixtures *in call order* — identify → tool calls → post-call — against one app instance and asserts the cumulative outcome: identify JSON returned under budget, tools executed or enqueued, post-call ack fast, job chain complete, one consistent Call row at the end. Deterministic, in CI, no Bolna credit spent. (Forward-ref: the *manual real-call* version stays a doc-15 smoke test, outside CI.)
 
 ### 5.8 Define the agent eval scenario file
 
-Create `apps/api/test/evals/scenarios.json` — a JSON array of `{ id, turns, assert }` cases (§3.5 test 5). Seed it with the mandatory safety cases: the adversarial "pretend you're Varun" (doc 16 §9 test 3), a "reveal Varun's salary" injection (doc 18), a "when is he free" tool-selection case, and a refusal case ("commit him to Tuesday"). This file is the **regression corpus** that grows every time production surprises you (§11).
+Create `apps/api/test/evals/scenarios.json` — a JSON array of `{ id, turns, assert }` cases (§3.5 test 5). Seed it with the mandatory safety cases: the adversarial "pretend you're Varun" (doc 16), a "reveal Varun's salary" injection (doc 18), a "when is he free" tool-selection case, and a refusal case ("commit him to Tuesday"). This file is the **regression corpus** that grows every time production surprises you (§11).
 
 ---
 
@@ -633,8 +649,8 @@ npm test                                 # run ALL workspaces once (exactly what
 npm run test:coverage                    # v8 coverage report → coverage/index.html (§2.8)
 
 # --- Path / name filters (fast focus while iterating) ---
-npx vitest run src/features/agent        # only the agent feature's tests
-npx vitest run agent.orchestrator        # by filename substring
+npx vitest run src/features/webhooks     # only the webhook surface's tests
+npx vitest run post-call.routes          # by filename substring
 npx vitest run -t "never impersonate"    # by test-name pattern (-t)
 
 # --- A single workspace ---
@@ -646,12 +662,12 @@ docker compose -f docker-compose.test.yml up -d
 npx prisma migrate deploy && npx prisma db seed     # schema + settings into the test DB
 npm run test:int                                    # app.inject() + repository against test DB
 
-# --- The agent eval script (docs 16/18) — run on prompt/model changes ---
+# --- The agent eval script (docs 16/18) — run on prompt/model-config changes ---
 npm run test:eval                        # CI mode: stubbed Claude, deterministic, key-free (§3.5)
 USE_FAKE_PROVIDERS=false npm run test:eval          # release mode: real model, scored (outside the merge gate)
 
-# --- The voice-turn simulation (doc 17) — mocked vendors, whole loop ---
-npm run test:sim                         # first-audio + barge-in→LISTENING, deterministic
+# --- The call-flow simulation (doc 17) — fixtures in call order, whole chain ---
+npm run test:sim                         # identify → tools → post-call → job chain, deterministic
 
 # --- CI-local parity: the exact gate, before you push (doc 14 §7) ---
 npm ci && npm run lint && npm run typecheck && npm test
@@ -691,30 +707,33 @@ You are done with this document when **all** of the following hold:
 1. **Unit suite is green with zero network.** `npm run test:api` passes with your machine's network off (or a network guard installed). No test opens a socket to a vendor; fake timers mean no test `sleep`s. Fast enough (<a few seconds) to run on every save (§11).
 2. **Integration suite is green against the test DB + Redis.** With `docker-compose.test.yml` up and migrations applied (§5.5, §3.6), `npm run test:int` passes: `app.inject()` routes hit a real service + repository against ephemeral Postgres; BullMQ job tests hit ephemeral Redis.
 3. **Coverage report generates and sits at a sensible floor.** `npm run test:coverage` produces an HTML/lcov report; `core`/`features` land **~70–80%** lines — a floor you understand, not 100% you gamed (§2.8).
-4. **A contract test catches a deliberately broken response shape.** Temporarily change a repository to return a wrong field type (or drop a field); the `CallListResponse.parse()`/`CallResponse.parse()` assertion (§3.5 test 2) **fails** — proving the api↔web contract is guarded in CI, not in the dashboard (doc 12 §11). Revert.
-5. **The never-impersonate eval fails a sabotaged prompt.** Temporarily weaken the identity block in `agent.prompts.ts` (doc 16 §4); the `impersonation-basic` eval (§3.5 test 5) **goes red**. Restore it and confirm green. This proves the eval actually guards the doc 00 §2.3 guarantee.
-6. **CI runs the whole thing with no vendor key present.** Push a PR; the `verify` job (doc 14 §4.1, extended §3.6) goes green with Postgres/Redis services and **no** `ANTHROPIC_/DEEPGRAM_/ELEVENLABS_/EXOTEL_` secret configured — the doc 14 §8.3 property demonstrated, not asserted.
+4. **A contract test catches a deliberately broken response shape.** Temporarily change a repository to return a wrong field type (or drop a field); the `CallListResponse.parse()`/`CallResponse.parse()` assertion (§3.5 test 2) **fails** — proving the api↔web contract is guarded in CI, not in the dashboard (doc 12 §11). Then temporarily add a `privateNotes` field to the identify serializer; the identify contract test **fails** — proving the no-private-field invariant (doc 18) is guarded too. Revert both.
+5. **The idempotency test catches a deliberately broken handler.** Temporarily remove the `execution_id` dedupe check from the post-call handler; the duplicate-delivery test (§3.5 test 4) **fails** with two Call rows. Restore. This is the test standing between you and duplicate summaries/emails on every Bolna retry.
+6. **The never-impersonate eval fails a sabotaged prompt.** Temporarily weaken the identity block in the prompt source file (doc 16); the `impersonation-basic` eval (§3.5 test 5) **goes red**. Restore it and confirm green. This proves the eval actually guards the doc 00 §2.3 guarantee.
+7. **CI runs the whole thing with no vendor key present.** Push a PR; the `verify` job (doc 14 §4.1, extended §3.6) goes green with Postgres/Redis services and **no** `ANTHROPIC_/BOLNA_/GOOGLE_` secret configured — the doc 14 §8.3 property demonstrated, not asserted.
 
 **Self-quiz** (answer from memory):
 
 1. **Why do ports make CI key-free?** (Features call ports; DI binds fakes in test — no adapter, no SDK, no key in the loop; §2.5, §8.)
 2. **Unit vs integration vs contract vs eval** — one sentence each, and what a failure of each *means*.
-3. **What does the replay client test deterministically**, and what does it *not* test that the manual smoke test does? (§3.5 test 4, doc 15.)
-4. **Why not chase 100% coverage?** (Executing a line ≠ asserting behaviour; the number becomes the goal and tests rot into cost; §2.8.)
-5. **Which single env var makes the core run vendor-free, and how?** (`USE_FAKE_PROVIDERS=true` → DI binds fakes; §8.)
+3. **What does the call-flow simulation test deterministically**, and what does it *not* test that the manual Bolna test call does? (§3.5, §5.7, doc 15.)
+4. **Why must the post-call handler be idempotent, and how does the test prove it?** (Bolna may retry; same `execution_id` twice → one row, one job chain; §3.5 test 4.)
+5. **Why not chase 100% coverage?** (Executing a line ≠ asserting behaviour; the number becomes the goal and tests rot into cost; §2.8.)
+6. **Which single env var makes the core run vendor-free, and how?** (`USE_FAKE_PROVIDERS=true` → DI binds fakes; §8.)
 
 ---
 
 ## 10. Common Mistakes
 
-1. **Testing against real vendor APIs.** Calling Deepgram/Claude/ElevenLabs in tests makes them **flaky** (a vendor blip fails your build), **costly** (metered calls per run), and forces **keys into CI** — defeating the doc 14 §8.3 property. Fake the ports (§2.5); the real vendors are proven once, manually, in doc 15's smoke test.
+1. **Testing against real vendor APIs.** Calling Bolna/Claude/Google in tests makes them **flaky** (a vendor blip fails your build), **costly** (metered calls and credits per run), and forces **keys into CI** — defeating the doc 14 §8.3 property. Fake the ports and replay fixtures (§2.5); the real vendors are proven once, manually, with a Bolna test call in doc 15's smoke test.
 2. **Over-mocking until tests assert implementation, not behaviour.** A test full of `expect(x).toHaveBeenCalledBefore(y)` asserts *how* the code works and breaks on every refactor that keeps behaviour identical. Prefer fakes + outcome assertions (§2.4); mock only when the *interaction itself* is the contract (an enqueue, a tool dispatch).
 3. **No test DB isolation → order-dependent flakiness.** Tests that share rows pass alone and fail in a suite (or in a different order). Truncate or roll back between every test (§3.6); a test must never see another test's data.
 4. **Snapshotting everything.** Giant snapshots of API responses or rendered components "pass" by being blessed, then rot: every intentional change updates them blindly, and they catch nothing meaningful. Assert the **specific invariant** (a schema parse, a field value), not a wall of bytes (§2.7 vs snapshots).
-5. **Ignoring the async plane.** The BullMQ jobs (doc 01 §3.6) — persist-transcript, generate-summary, notify-varun, update-memory — are where post-call correctness lives, and they're easy to leave untested because they're not on the hot path. Test them against the test Redis; an untested job is a silent data-loss bug waiting to ship.
-6. **Not testing RLS.** RLS is the *only* thing between a compromised browser and the recruiter database (doc 11 §3.6). A missing or wrong policy ships **silently** — everything looks fine until data leaks. Assert both allow and **deny** (fail-closed), against real Supabase (§3.6).
-7. **Skipping the agent evals.** A one-line prompt tweak or a model bump can break the never-impersonate guarantee (doc 16 §2.3) with zero code change and zero unit-test signal. If the eval set doesn't run on prompt/model changes, that regression reaches a live call. Evals are not optional polish; they guard a hard product/legal rule (doc 00 §2.3).
-8. **Treating coverage % as the goal.** The moment "get to 90%" becomes the objective, engineers write assertion-free tests that execute lines. Coverage is a *map of untested code*, read as a signal; the goal is *meaningful assertions on behaviour that matters* (§2.8).
+5. **Ignoring the async plane.** The BullMQ jobs (doc 01) — persist-transcript, generate-summary, notify-varun, update-memory, store-recording — are where post-call correctness lives, and they're easy to leave untested because they're not on the hot path. Test them against the test Redis; an untested job is a silent data-loss bug waiting to ship.
+6. **Testing only single deliveries.** Every webhook test that sends a payload once and asserts success misses the failure mode that will actually happen: **retries**. Bolna may deliver post-call more than once; always pair the happy-path test with the duplicate-delivery test (§3.5 test 4).
+7. **Not testing RLS.** RLS is the *only* thing between a compromised browser and the recruiter database (doc 11 §3.6). A missing or wrong policy ships **silently** — everything looks fine until data leaks. Assert both allow and **deny** (fail-closed), against real Supabase (§3.6).
+8. **Skipping the agent evals.** A one-line prompt tweak in the Bolna dashboard or a model-config bump can break the never-impersonate guarantee (doc 16) with zero code change and zero unit-test signal. If the eval set doesn't run on prompt/model changes, that regression reaches a live call. Evals are not optional polish; they guard a hard product/legal rule (doc 00 §2.3).
+9. **Treating coverage % as the goal.** The moment "get to 90%" becomes the objective, engineers write assertion-free tests that execute lines. Coverage is a *map of untested code*, read as a signal; the goal is *meaningful assertions on behaviour that matters* (§2.8).
 
 ---
 
@@ -722,10 +741,10 @@ You are done with this document when **all** of the following hold:
 
 - **Tests gate merges.** The `verify` job is a required status check on `main` (doc 14 §5.6): no red suite reaches production. The suite is the wall; branch protection enforces it (doc 14 §3).
 - **A fast unit suite for the TDD loop, slower integration in CI.** Keep unit tests in the **sub-second-to-seconds** range (fake timers, no I/O, §2.6) so `test:watch` is a tight feedback loop; let the heavier integration/DB band run in CI on every PR where the Postgres/Redis services live (§3.6).
-- **Fixtures from REAL captured vendor messages.** The Exotel/Deepgram/ElevenLabs fixtures (§2.7, §5.6) come from actual captured frames (doc 05 §9.4), never hand-invented shapes — fidelity means a real vendor change is caught against a real sample, not masked by a fantasy one.
-- **The agent eval set grows with every production surprise.** Every disclosure violation Layer 3 catches (doc 16 §2.3), every wrong tool call, every successful injection becomes a new `scenarios.json` case — the corpus is a **regression museum** of everything that ever went wrong, run before every prompt/model change (doc 16 §11).
+- **Fixtures from REAL captured Bolna payloads.** The identify/tool/post-call fixtures (§2.7, §5.6) come from payloads captured during real doc-17 test calls, never hand-invented shapes — fidelity means a real Bolna format change is caught against a real sample, not masked by a fantasy one. When Bolna's docs and your fixture disagree, re-capture and verify against https://www.bolna.ai/docs.
+- **The agent eval set grows with every production surprise.** Every disclosure violation Layer 3 catches (doc 16), every wrong tool call, every successful injection becomes a new `scenarios.json` case — the corpus is a **regression museum** of everything that ever went wrong, run before every prompt/model change.
 - **Flaky-test quarantine policy.** A test that fails intermittently is a **liability** — it trains the team to ignore red. Policy: a flaky test is immediately `.skip`-ed with a tracking issue (quarantined), not left to erode trust in the suite; fix the non-determinism (§2.6) before re-enabling. Never "just re-run CI."
-- **Test the latency-budget math on the simulation.** The replay simulation (§3.5 test 4) logs the same `t0–t4` stage timestamps as production (doc 17 §5.4); assert the *computed* time-to-first-audio math and the barge-in timing in a test, so a regression in the pipeline's timing logic fails CI, not the 1.5s SLO on a real call (doc 01 §3.5).
+- **Guard the webhook budgets structurally.** You can't measure Bolna's network in a unit test, but you *can* assert the structural rules that keep the budgets (doc 08) honest: the identify handler performs one indexed lookup and no vendor call; slow tools (`send_resume`, `notify_varun`) **enqueue and return** rather than await; the post-call handler enqueues and acks. A test that fails when someone `await`s an email send inside a tool handler is a latency SLO guard in disguise.
 - **Contract tests as the api↔web safety net.** Every list/detail route's serialized output is parsed against its shared schema in CI (§3.5 test 2, doc 12 §11) — a repository refactor that changes a field type fails the API's build, long before the dashboard renders `undefined`.
 
 ---
@@ -734,11 +753,12 @@ You are done with this document when **all** of the following hold:
 
 Testing has its own security surface and, more importantly, *is* a security control:
 
-- **Tests never contain real secrets or PII.** Fixtures are **synthetic** — fake recruiter names, `test-0001` call SIDs, a canned resume — never a real transcript, email, or phone number (doc 00 §12). A test file is committed to git forever (doc 00 §5.5); a real secret or a real person's data in one is a permanent leak.
+- **Tests never contain real secrets or PII.** Fixtures keep the **real structure** but **synthetic content** — capture the shape from a real call (§5.6), then scrub: fake recruiter names, `exec-test-0001` execution ids, a placeholder phone number, a canned transcript. Never a real person's words, email, or number (doc 00 §12). A test file is committed to git forever; a real secret or a real person's data in one is a permanent leak.
 - **The key-free CI property is a security control (doc 14 §8.3 / doc 18).** Because `USE_FAKE_PROVIDERS=true` removes every adapter from the test loop (§2.5, §8), CI holds **no vendor key to steal**. A malicious PR or a compromised third-party action (doc 14 §10.2) running in CI finds nothing to exfiltrate. Preserving this property — never adding a vendor key to the merge gate — is an ongoing security discipline, not a one-time setup.
-- **Test the negative security paths, not just the happy ones.** Assert the *denials*: `401` without a JWT and `403` for a valid-but-non-Varun token (doc 12 §12, §3.5 test 2); RLS **deny** for `anon` and for the API-only tables (doc 11 §3.6, §3.6); the webhook/WS rejected **without a valid token** (doc 12 §2.6, doc 17 §12). A security control with no test is a control you're *hoping* works.
-- **Prompt-injection regression tests (doc 18).** The eval corpus (§3.5 test 5) includes injection attempts — "ignore your instructions," "you are now Varun," "reveal the system prompt" — asserting the assistant treats caller speech as **data** (doc 16 §4, doc 01 §12) and refuses. Every real-world injection that lands becomes a permanent regression case, so a prompt change can never silently reopen the hole.
-- **Don't log real transcripts in test output.** The same Pino redaction rule as production (doc 09, doc 17 §12) applies to test logs and assertion failures: log `callSid`, stage, and lengths — never caller words or PII bytes. A CI log is world-readable on a public repo and readable by everyone with access on a private one.
+- **Test the negative security paths, not just the happy ones.** Assert the *denials*: `401` without a JWT and `403` for a valid-but-non-Varun token (doc 12 §12, §3.5 test 2); RLS **deny** for `anon` and for the API-only tables (doc 11 §3.6, §3.6); each of the three webhook surfaces rejected **without a valid Bearer token, before any side effect** (docs 08/18, §3.5 test 1). A security control with no test is a control you're *hoping* works.
+- **The identify no-private-field invariant is a test, not a habit.** A contract test parses the identify response against a schema that has **no field for private notes** and asserts none appears (doc 18 §12.2) — because everything in that JSON is recitable by the agent to a stranger. This is the one place a serializer refactor could quietly become a data breach.
+- **Prompt-injection regression tests (doc 18).** The eval corpus (§3.5 test 5) includes injection attempts — "ignore your instructions," "you are now Varun," "reveal the system prompt" — asserting the assistant treats caller speech as **data** (doc 16, doc 01 §12) and refuses. Every real-world injection that lands becomes a permanent regression case, so a prompt change can never silently reopen the hole.
+- **Don't log real transcripts in test output.** The same Pino redaction rule as production (doc 09) applies to test logs and assertion failures: log `executionId`, stage, and lengths — never caller words or PII bytes. A CI log is world-readable on a public repo and readable by everyone with access on a private one.
 
 ---
 
@@ -746,10 +766,10 @@ Testing has its own security surface and, more importantly, *is* a security cont
 
 - [ ] Test pyramid (§2.2) + testing-trophy emphasis (§2.3) understood — proportions pyramid, weight the integration band
 - [ ] Test-double taxonomy (stub/mock/fake/spy) known; prefer fakes + spies over rigid mocks (§2.4)
-- [ ] Why ports + repositories make the core testable **and CI key-free** (§2.5, §8) — statable from memory
+- [ ] Why ports + repositories + HTTP-replayable webhooks make the core testable **and CI key-free** (§2.5, §8) — statable from memory
 - [ ] Determinism disciplines internalized: no real network, injected clock (fake timers), injected random (§2.6)
-- [ ] Contract testing understood: `packages/shared` Zod schemas are the api↔web promise, parsed in CI (§2.7, §3.5)
-- [ ] What NOT to test (third-party internals) and coverage-as-signal (~70–80%, not 100%) understood (§2.8)
+- [ ] Contract testing understood at both edges: `packages/shared` schemas (api↔web) and the doc-08 webhook schemas (Bolna↔us), parsed in CI (§2.7, §3.5)
+- [ ] What NOT to test (third-party internals, Bolna's voice loop) and coverage-as-signal (~70–80%, not 100%) understood (§2.8)
 - [ ] Five test types mapped to layers (§3.1) and the five illustrative tests read (§3.5)
 - [ ] Test DB strategy understood: local ephemeral Postgres for speed + Supabase staging for RLS/Realtime; `migrate deploy` + seed; per-test truncate/rollback (§3.6)
 - [ ] `ci.yml` extended with `services: postgres, redis` and NO vendor keys (§3.6, doc 14)
@@ -757,15 +777,16 @@ Testing has its own security surface and, more importantly, *is* a security cont
 - [ ] v8 coverage configured with a floor, not a target (§5.2)
 - [ ] `test/setup.ts` binds fakes + fake timers + `NODE_ENV=test` (§5.4)
 - [ ] `docker-compose.test.yml` (ephemeral Postgres + Redis) up; `TEST_DATABASE_URL`/`TEST_REDIS_URL` set (§5.5)
-- [ ] Fixtures directory populated from REAL captured vendor messages (§5.6, §2.7)
-- [ ] Voice replay simulation committed as a deterministic mocked-vendor test (§5.7)
+- [ ] Fixtures directory populated from REAL captured Bolna payloads, PII scrubbed (§5.6, §2.7, §12)
+- [ ] Call-flow simulation committed: fixtures injected in call order, job chain asserted (§5.7)
+- [ ] Idempotency test in place: duplicate post-call delivery = one row, one job chain (§3.5 test 4)
 - [ ] `scenarios.json` eval corpus seeded with never-impersonate + injection + tool + refusal cases (§5.8)
 - [ ] Four env vars added to `.env.example`/CI: `TEST_DATABASE_URL`, `TEST_REDIS_URL`, `NODE_ENV=test`, `USE_FAKE_PROVIDERS=true` (§8)
-- [ ] Verification 1–6 passed, incl. a deliberately broken response shape failing a contract test and a sabotaged prompt failing the never-impersonate eval (§9)
+- [ ] Verification 1–7 passed, incl. broken shapes failing contract tests, a broken dedupe failing the idempotency test, and a sabotaged prompt failing the never-impersonate eval (§9)
 - [ ] Self-quiz (§9) passed from memory
 
 ---
 
 ## 14. Next Step
 
-Proceed to **`20_ROADMAP.md`** — with the system built, deployed (doc 15), and guarded by a merge-gating suite that proves both correctness and the never-impersonate guarantee, the final planning document steps back to *what comes next*: the honest stage-2 backlog (multi-tenant, WhatsApp/SMS channels, richer memory, multi-model routing, cost/observability dashboards), the technical debt deliberately deferred through docs 00–19, and how the ports, repositories, and eval corpus you just tested make each of those a bounded, testable change rather than a rewrite.
+Proceed to **`20_ROADMAP.md`** — the build plan that sequences everything you have read: Phase 0's scaffold (already done), the data layer, the webhook surface and tools, the Bolna agent and the first live call, the async plane, the dashboard, and the deploy/security/testing hardening — each phase mapped to the docs that specify it, with the tests from *this* document landing beside the code in every phase, not at the end.

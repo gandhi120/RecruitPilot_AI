@@ -50,3 +50,6 @@ Thumbs.db
 # Docker / local data volumes (doc 13)
 docker/data/
 redis-data/
+
+# Claude Code local state (worktrees, session settings) — never commit
+.claude/

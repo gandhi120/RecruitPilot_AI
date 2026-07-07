@@ -7,16 +7,16 @@
 
 ## 1. Goal
 
-Take the container images CI now builds (doc 14) and run them on a real, public, always-on server in Mumbai — the box that answers actual recruiter phone calls.
+Take the container images CI now builds (doc 14) and run them on a real, public, always-on server in Mumbai — the box Bolna calls, mid-conversation, on every real recruiter phone call.
 
 By the end of this document you will have:
 
 - **A production server**: one AWS EC2 instance (`t3.small`, Ubuntu 24.04) in `ap-south-1` (Mumbai), running the exact `docker-compose.prod.yml` stack from doc 13 — nginx + certbot + api + worker + web + redis.
 - **A stable public address**: an Elastic IP so the server's address never changes, plus two DNS records (`api.yourdomain` and `app.yourdomain`) pointing at it.
-- **Real TLS**: Let's Encrypt certificates issued and auto-renewing, so `https://` shows a padlock and — critically — **Exotel will accept the `wss://` voice stream** (self-signed certs are rejected; §2.8).
-- **The Exotel cutover**: the Voicebot applet repointed from the throwaway ngrok tunnel (doc 05) to your permanent `wss://api.yourdomain/voice/stream`.
+- **Real TLS**: Let's Encrypt certificates issued and auto-renewing, so `https://` shows a padlock and — critically — **Bolna's webhook calls succeed** (Bolna calls public HTTPS URLs and validates certificates; §2.8).
+- **The Bolna cutover**: the agent's three webhook URLs (identify, tools, post-call — doc 08) repointed from the throwaway ngrok tunnel (doc 17) to your permanent `https://api.yourdomain/webhooks/bolna/...`.
 - **Monitoring**: the CloudWatch agent shipping container logs and system metrics, with alarms that email you when the api errors, the box wedges, or the disk fills.
-- **The deploy loop closed**: the GitHub secrets doc 14 referenced but couldn't fill (`EC2_HOST`, `EC2_USER`, `EC2_SSH_PRIVATE_KEY`) now have real values, so merging to `main` auto-deploys with zero dropped calls.
+- **The deploy loop closed**: the GitHub secrets doc 14 referenced but couldn't fill (`EC2_HOST`, `EC2_USER`, `EC2_SSH_PRIVATE_KEY`) now have real values, so merging to `main` auto-deploys with the webhook surface answering throughout.
 
 This is the document where "it works in Docker on my laptop" (doc 13) becomes "a recruiter in Bangalore dials a number and an AI answers." Every step is click-level from an empty AWS signup page — assume nothing.
 
@@ -32,7 +32,7 @@ This is the document where "it works in Docker on my laptop" (doc 13) becomes "a
 
 Two geography words you must get right:
 
-- A **Region** is a physical cluster of data centres in one part of the world. `ap-south-1` is **Mumbai**. We choose it deliberately: doc 01 §3.5 budgets ~100 ms for Exotel→server audio transit, and Exotel's Indian telephony plus your recruiters live in India. A server in Virginia would add 200+ ms round-trip to *every* audio frame and blow the latency budget. **Region is a latency decision, and Mumbai is non-negotiable for this product.**
+- A **Region** is a physical cluster of data centres in one part of the world. `ap-south-1` is **Mumbai**. We choose it deliberately: the identify webhook must answer inside ~500 ms and tool calls inside ~800 ms (doc 01, doc 08), and every one of those requests originates from Bolna — an India-first platform with an Indian data-residency option — during a call with an Indian recruiter. A server in Virginia would add 200+ ms of round-trip to every webhook and eat most of the identify budget in transit. **Region is a latency decision, and Mumbai is the right one for this product.**
 - An **Availability Zone (AZ)** is one isolated data centre *within* a region (`ap-south-1a`, `-1b`, `-1c`). Multi-AZ designs survive one data centre losing power. Stage 1 (doc 01 §3.7) is a single instance in a single AZ — deliberately. We are not building HA yet; we are building a working product. AWS picks the AZ for us.
 
 ### 2.2 Instance families and why `t3.small`
@@ -46,7 +46,7 @@ AWS names instances `<family><generation>.<size>` — `t3.small` = the **t** (bu
 | **c** (compute) | CPU-heavy | Video encoding, simulation |
 | **r** (memory) | RAM-heavy | In-memory caches, big DBs |
 
-**Why `t` (burstable) fits us honestly.** Burstable instances earn **CPU credits** while idle and spend them when busy; if you run the CPU hot *continuously* you exhaust credits and get throttled to a low baseline. That would be fatal for a CPU-bound service — but look at what our box actually does (doc 01 §3.2): during a call it **streams** audio between vendors. The heavy compute (STT, the LLM, TTS) happens on Deepgram / Anthropic / ElevenLabs servers, not ours. Our steady-state CPU is light — shuffling ~20 ms audio frames and running a Node event loop. The one CPU-heavier task, post-call summary generation, runs in the **worker** and is Claude's work anyway (doc 01 §3.6). So bursty, mostly-idle CPU with occasional spikes is exactly the burstable profile. We will still **watch `CPUCreditBalance`** (§9, §10) — honesty means measuring, not assuming.
+**Why `t` (burstable) fits us honestly.** Burstable instances earn **CPU credits** while idle and spend them when busy; if you run the CPU hot *continuously* you exhaust credits and get throttled to a low baseline. That would be fatal for a CPU-bound service — but look at what our box actually does (doc 01 §3.2): during a call it answers a handful of **small JSON webhooks** (identify, tool calls). The heavy compute — telephony, STT, the live LLM turns, TTS — happens on Bolna's and Anthropic's servers, not ours. Our steady-state CPU is nearly idle; the one CPU-heavier moment, the post-call job chain (summary via Claude, recording download), runs in the **worker** and is mostly waiting on the network anyway (doc 01 §3.6). So bursty, mostly-idle CPU with occasional spikes is exactly the burstable profile. We will still **watch `CPUCreditBalance`** (§9, §10) — honesty means measuring, not assuming.
 
 **Why 2 GB / `small`, not 1 GB / `micro`.** Sum the doc-13 `mem_limit`s: api 1g + worker 512m + web 512m + redis 256m + nginx/certbot (~50m) ≈ **2.3 GB of ceilings**. Real resident usage is lower, but a 1 GB `micro` would OOM-kill the api mid-call the first time three things spike together. 2 GB gives working headroom for a single-instance stage-1 build. **The upgrade path is trivial** (§11): stop the instance, change the instance type in the console, start it — same disk, same Elastic IP, ~2 minutes of downtime. So start small and grow on evidence, never on fear.
 
@@ -55,7 +55,7 @@ AWS names instances `<family><generation>.<size>` — `t3.small` = the **t** (bu
 By default, an EC2 instance's public IP is **ephemeral**: stop and start the instance (e.g. to resize it, §2.2) and AWS hands you a *different* public IP. That is catastrophic for us because **two external systems hard-code our address**:
 
 1. **DNS A records** (`api.yourdomain` → an IP). If the IP changes, the domain points at a stranger's server until you notice and edit DNS.
-2. **The Exotel Voicebot applet** ultimately resolves `wss://api.yourdomain/...` — anchored to that DNS record.
+2. **Bolna's agent config** ultimately resolves `https://api.yourdomain/webhooks/bolna/...` for identify, tools, and post-call — all anchored to that DNS record. If the record goes stale, every call runs blind: no memory, no tools, no post-call data.
 
 An **Elastic IP** is a public IPv4 address AWS *reserves for your account* and you *associate* with an instance. It survives stop/start, resize, even detaching and reattaching to a replacement instance. One caveat AWS enforces to discourage hoarding: an Elastic IP is **free while associated with a running instance**, but billed a small hourly rate when allocated and *not* attached (e.g. after you terminate the instance but forget to release the IP). Allocate it, associate it, and it's part of the ~$15–25/mo estimate.
 
@@ -64,7 +64,7 @@ An **Elastic IP** is a public IPv4 address AWS *reserves for your account* and y
 A **security group (SG)** is a virtual firewall wrapped around your instance's network interface. You write **inbound rules** ("allow TCP 443 from anywhere") and **outbound rules** ("allow all"). Two properties matter:
 
 - **Default-deny inbound.** Nothing reaches the box unless a rule explicitly allows it. An unlisted port is invisible to the internet — this is your first and most important line of defence.
-- **Stateful.** If an inbound rule allows a connection, the *reply* traffic is automatically allowed back out — you do not write a matching outbound rule. (Contrast with old-school stateless ACLs where you'd hand-write both directions.) This is why the default "allow all outbound" is fine: the api *initiating* a call to Deepgram is outbound, and Deepgram's streamed responses come back on that established connection automatically.
+- **Stateful.** If an inbound rule allows a connection, the *reply* traffic is automatically allowed back out — you do not write a matching outbound rule. (Contrast with old-school stateless ACLs where you'd hand-write both directions.) This is why the default "allow all outbound" is fine: the worker *initiating* a request to the Claude API or Bolna's recording URL is outbound, and the response comes back on that established connection automatically.
 
 Our SG opens exactly three inbound ports (§5 step 2): **443** (HTTPS/WSS, from anywhere — the public product), **80** (HTTP, from anywhere — only for the Let's Encrypt challenge and the redirect to 443), and **22** (SSH, **from your IP only**). Everything else — including Redis's 6379 — is denied at the cloud edge, layered *on top of* the fact that doc 13 already gives Redis no published port at all (defence in depth, §12).
 
@@ -86,7 +86,7 @@ We create **two subdomains, both A records pointing at the same Elastic IP**:
 | Name | Serves | Why separate |
 |---|---|---|
 | `app.yourdomain` | the Next.js dashboard (web) | Varun's browser |
-| `api.yourdomain` | the Fastify API + the `wss://` voice stream | Exotel + the dashboard's API calls |
+| `api.yourdomain` | the Fastify API + the Bolna webhook surface | Bolna + the dashboard's API calls |
 
 Why not one host with paths (`yourdomain/app`, `yourdomain/api`)? **Cleaner cookies and CORS.** Auth cookies are scoped by *host*; keeping the dashboard on its own origin means its session cookie never rides along on API/voice requests it has no business touching, and CORS rules between `app.` and `api.` are explicit and auditable. It also lets you reason about — and later split — the two workloads independently. Both names resolve to one box today; the separation is architectural hygiene that costs nothing now and saves pain later. (nginx routes by `server_name`, §5 step 7.)
 
@@ -98,15 +98,15 @@ The proof-of-control method we use is **HTTP-01**: certbot asks Let's Encrypt fo
 
 Let's Encrypt certs are **valid for 90 days** by design, to force automation. Doc 13's `certbot` service already runs a renewal loop (`certbot renew` every 12 h); `renew` is a no-op until a cert is within 30 days of expiry, then it reissues. After renewal, **nginx must reload** to pick up the new cert file (§7 shows the reload hook). You verify the whole machine works *before* you rely on it with `certbot renew --dry-run` (§9, §10) — the number-one cause of a 2 a.m. outage is a renewal that was never tested.
 
-### 2.8 Why WSS specifically demands a *valid* TLS cert
+### 2.8 Why the webhooks demand a *valid* TLS cert
 
-Exotel's Voicebot applet opens a **secure WebSocket (`wss://`)** to our voice gateway (doc 01 §3.2). A `wss://` handshake begins with a normal TLS handshake — and **Exotel validates the certificate against the public CA trust store and rejects anything self-signed or expired.** During local development you tunnelled through ngrok (doc 05), which supplied a real, publicly-trusted cert for you. In production *you* are the origin, so *you* must present a real Let's Encrypt cert on `api.yourdomain`. Get this wrong and the symptom is brutal and specific: **every call fails at connect with no audio**, because the socket never upgrades. A valid cert on `api.` is therefore not "nice security hygiene" — it is a hard functional dependency of the product.
+Bolna calls our three webhook URLs over **public HTTPS** (doc 01 §3.2, doc 08), and like any well-behaved HTTP client it **validates the certificate against the public CA trust store and rejects anything self-signed or expired.** During local development you tunnelled through ngrok (doc 17), which supplied a real, publicly-trusted cert for you. In production *you* are the origin, so *you* must present a real Let's Encrypt cert on `api.yourdomain`. Get this wrong and the symptom is quiet and nasty: calls still connect (Bolna owns the telephony), but **the agent runs blind** — identify fails so no memory is injected, tool calls fail so the agent apologises on air, and post-call webhooks fail so transcripts and summaries silently never arrive. A valid cert on `api.` is therefore not "nice security hygiene" — it is a hard functional dependency of the product.
 
 ### 2.9 CloudWatch — logs, metrics, filters, alarms, SNS
 
 A server you can't see is a server you can't operate. **Amazon CloudWatch** is AWS's monitoring service; the **CloudWatch agent** is a small process you install on the instance that ships two things to CloudWatch:
 
-- **Logs** — we point it at Docker's `json-file` logs (doc 13 already caps them at 10 MB × 3). Our api emits **Pino JSON** (doc 09), so each log line is structured `{"level":50,"msg":"...","callSid":"..."}` — machine-queryable, not a wall of text.
+- **Logs** — we point it at Docker's `json-file` logs (doc 13 already caps them at 10 MB × 3). Our api emits **Pino JSON** (doc 09), so each log line is structured `{"level":50,"msg":"...","executionId":"..."}` — machine-queryable, not a wall of text, and correlated per call by the Bolna execution id (doc 01).
 - **Metrics** — CPU, memory, disk. (EC2 reports CPU/network/status *for free* from the hypervisor, but **memory and disk usage are inside the OS** and only the agent can see them — a classic gap that leaves you blind to a full disk until it's too late.)
 
 The alerting chain, in order:
@@ -132,11 +132,11 @@ The production topology — DNS, TLS, the single public box, and the private net
 flowchart TB
     subgraph INTERNET["Public Internet"]
         REC([Recruiter's phone])
-        EXO["Exotel<br/>Voicebot applet"]
+        BOLNA["Bolna platform<br/>telephony · STT · TTS ·<br/>LLM orchestration"]
         VARUN([Varun's browser])
         REG["Domain registrar DNS<br/>A: api.yourdomain → Elastic IP<br/>A: app.yourdomain → Elastic IP"]
         LE["Let's Encrypt CA<br/>(HTTP-01 challenge)"]
-        VENDORS(("Deepgram · Claude ·<br/>ElevenLabs · Supabase · SMTP"))
+        VENDORS(("Claude · Supabase ·<br/>Google Calendar · SMTP"))
         CW["Amazon CloudWatch<br/>Logs · Metrics · Alarms"]
         SNS["SNS topic → email"]
     end
@@ -147,7 +147,7 @@ flowchart TB
         direction TB
         SG{{"Security Group<br/>in: 443 any · 80 any · 22 MY-IP-only<br/>out: all (stateful)"}}
         subgraph EDGE["docker network: edge"]
-            NG["nginx :80/:443<br/>TLS termination · server_name routing<br/>WS upgrade for /voice/stream"]
+            NG["nginx :80/:443<br/>TLS termination · server_name routing<br/>plain HTTPS proxying"]
             API["api (Fastify)<br/>node dist/server.js"]
             WK["worker<br/>node dist/worker.js"]
             WEB["web (Next.js)"]
@@ -159,21 +159,22 @@ flowchart TB
         CWA["CloudWatch agent<br/>(IAM role: CloudWatchAgentServerPolicy)"]
     end
 
-    REC -->|"PSTN call"| EXO
-    EXO -->|"resolve api.yourdomain"| REG
+    REC -->|"PSTN call"| BOLNA
+    BOLNA -->|"resolve api.yourdomain"| REG
     VARUN -->|"resolve app.yourdomain"| REG
     REG -.->|"Elastic IP"| EIP
-    EXO ==>|"wss://api.yourdomain/voice/stream"| EIP
+    BOLNA ==>|"HTTPS webhooks:<br/>identify · tools · post-call"| EIP
     VARUN ==>|"https://app.yourdomain"| EIP
     LE -->|"GET /.well-known/acme-challenge"| EIP
     EIP --> SG --> NG
-    NG -->|"proxy /voice/stream + /api"| API
+    NG -->|"proxy /webhooks + /api"| API
     NG -->|"proxy /"| WEB
     CB -.->|"shared cert + webroot volumes<br/>reload on renew"| NG
     API ---|"redis DNS"| RD
     WK ---|"redis DNS"| RD
     API --> VENDORS
     WK --> VENDORS
+    WK -->|"recording download<br/>(BOLNA_API_KEY)"| BOLNA
     API -->|"GHCR pull on deploy"| GHCR[("ghcr.io<br/>recruitpilot-api/-web images")]
     CWA -->|"docker json logs + mem/disk"| CW
     CW --> SNS --> VARUN
@@ -181,8 +182,8 @@ flowchart TB
 
 Read the diagram as three flows:
 
-- **Inbound product traffic** (bold arrows): recruiter → Exotel → DNS → Elastic IP → SG (443) → nginx → api (WSS) / web (HTTPS). Redis is unreachable from here by construction — it lives on `internal:true` with no port.
-- **The TLS lifeline** (dotted): Let's Encrypt reaches port 80 for the challenge; certbot and nginx share the cert volumes; certbot reloads nginx on renewal. Break this and WSS dies (§2.8).
+- **Inbound product traffic** (bold arrows): recruiter → Bolna (the call itself lives there) → DNS → Elastic IP → SG (443) → nginx → api (webhooks) / web (HTTPS). Redis is unreachable from here by construction — it lives on `internal:true` with no port.
+- **The TLS lifeline** (dotted): Let's Encrypt reaches port 80 for the challenge; certbot and nginx share the cert volumes; certbot reloads nginx on renewal. Break this and every webhook fails (§2.8).
 - **The observability spine**: the CloudWatch agent (authorized by the IAM role) ships Docker logs + OS metrics to CloudWatch, whose alarms fan out through SNS to your inbox.
 
 ---
@@ -407,24 +408,20 @@ The doc-13 nginx.conf serves the ACME challenge on port 80 and has no 443 block 
        location / { return 301 https://$host$request_uri; }
    }
 
-   # API + voice WebSocket — api.yourdomain
+   # API + Bolna webhooks — api.yourdomain
    server {
        listen 443 ssl;
        server_name api.yourdomain;
        ssl_certificate     /etc/letsencrypt/live/api.yourdomain/fullchain.pem;
        ssl_certificate_key /etc/letsencrypt/live/api.yourdomain/privkey.pem;
 
-       # --- the voice WebSocket (doc 13 §4.6) ---
-       location /voice/stream {
+       # --- the Bolna webhook surface (doc 13 §4.6, doc 08) ---
+       location /webhooks/ {
            proxy_pass http://api_upstream;
            proxy_http_version 1.1;
-           proxy_set_header Upgrade $http_upgrade;
-           proxy_set_header Connection $connection_upgrade;
            proxy_set_header Host $host;
            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-           proxy_read_timeout 3600s;
-           proxy_send_timeout 3600s;
-           proxy_buffering off;
+           proxy_set_header X-Forwarded-Proto $scheme;
        }
        location /api/ {
            proxy_pass http://api_upstream;
@@ -450,7 +447,7 @@ The doc-13 nginx.conf serves the ACME challenge on port 80 and has no 443 block 
        }
    }
    ```
-   (The `map $http_upgrade $connection_upgrade`, `upstream api_upstream`, and `upstream web_upstream` blocks from doc 13 §4.6 remain in the `http {}` wrapper unchanged.)
+   (The `upstream api_upstream` and `upstream web_upstream` blocks from doc 13 §4.6 remain in the `http {}` wrapper unchanged.)
 3. **Reload nginx** to pick up the certs and new blocks:
    ```bash
    docker compose -f docker-compose.prod.yml exec nginx nginx -t     # test config
@@ -462,15 +459,19 @@ The doc-13 nginx.conf serves the ACME challenge on port 80 and has no 443 block 
    ```
    A clean dry-run is your proof the auto-renewal machine works (§2.7, §10).
 
-### 5.8 Exotel cutover — repoint the applet from ngrok to production
+### 5.8 Bolna cutover — repoint the webhooks from ngrok to production
 
-1. Log in to your **Exotel dashboard** (doc 05) → **App Bazaar / Voicebot applet** used by your ExoPhone's call flow.
-2. Change the stream URL from the dev **ngrok** value (doc 05) to your permanent production URL:
+During development every Bolna → us URL pointed at an ngrok tunnel (doc 17). Repoint all three surfaces to production:
+
+1. Log in to your **Bolna dashboard** (doc 05) and open the production agent (`BOLNA_AGENT_ID`).
+2. Update the three webhook URLs from the dev **ngrok** values to your permanent production URLs (exact tab locations per doc 06):
    ```
-   wss://api.yourdomain/voice/stream?token=VOICE_WS_AUTH_TOKEN
+   inbound / caller identification →  https://api.yourdomain/webhooks/bolna/identify
+   each custom tool's "value.url"  →  https://api.yourdomain/webhooks/bolna/tools/<tool>
+   analytics / post-call webhook   →  https://api.yourdomain/webhooks/bolna/post-call
    ```
-   Use the **production** `VOICE_WS_AUTH_TOKEN` (the one now in the server `.env`, §8) — not the dev token.
-3. Save/publish the applet. The ngrok tunnel from doc 05 can now be shut down for good. (Leaving the applet on a dead ngrok URL is a classic post-launch outage — §10.)
+   Each must carry the **production** `BOLNA_WEBHOOK_TOKEN` as its Bearer token (the one now in the server `.env`, §8) — not the dev token. The exact fields are in the tool JSON definitions (doc 08).
+3. Save/publish the agent config. The ngrok tunnel from doc 17 can now be shut down for good. (Leaving the agent on a dead ngrok URL is a classic post-launch failure — calls connect but the agent runs blind; §10.)
 
 ### 5.9 CloudWatch — role, agent, logs, metrics, alarms
 
@@ -542,6 +543,7 @@ The doc-13 nginx.conf serves the ACME challenge on port 80 and has no 443 block 
 | Metric filters | https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/MonitoringLogData.html |
 | SNS email subscriptions | https://docs.aws.amazon.com/sns/latest/dg/sns-email-notifications.html |
 | IAM roles for EC2 | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-roles-for-amazon-ec2.html |
+| Bolna docs (webhook/agent config) | https://www.bolna.ai/docs |
 | UptimeRobot (external monitor) | https://uptimerobot.com |
 
 ---
@@ -580,6 +582,13 @@ docker compose -f docker-compose.prod.yml run --rm certbot renew --dry-run  # te
 docker compose -f docker-compose.prod.yml exec nginx nginx -t              # test config
 docker compose -f docker-compose.prod.yml exec nginx nginx -s reload       # apply new cert
 
+# --- Webhook smoke tests (from laptop; exact shapes in doc 08) ---
+# No token → 401 (proves auth is on):
+curl -si "https://api.yourdomain/webhooks/bolna/identify?contact_number=%2B919999999999" | head -n 1
+# With the prod token → 200 + JSON (proves DNS → TLS → nginx → Fastify → DB):
+curl -s "https://api.yourdomain/webhooks/bolna/identify?contact_number=%2B919999999999" \
+  -H "Authorization: Bearer $BOLNA_WEBHOOK_TOKEN" | jq
+
 # --- CloudWatch agent ---
 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json -s
@@ -610,22 +619,14 @@ Two distinct secret stores exist in production — do not confuse them.
 | `SUPABASE_JWT_SECRET` | 12 | Verify Supabase-issued JWTs at the `/v1` preHandler |
 | `DATABASE_URL` | 04 (+11) | Pooled Prisma connection (`:6543`, `pgbouncer=true`) |
 | `DIRECT_URL` | 04 (+11) | Direct connection (`:5432`) for migrations |
-| `EXOTEL_ACCOUNT_SID` | 05 | Exotel account id in REST paths |
-| `EXOTEL_API_KEY` | 05 | Exotel REST basic-auth username |
-| `EXOTEL_API_TOKEN` | 05 | Exotel REST basic-auth password (secret) |
-| `EXOTEL_SUBDOMAIN` | 05 | Exotel API cluster host (`api.in.exotel.com`) |
-| `EXOTEL_VIRTUAL_NUMBER` | 05 | The ExoPhone (E.164) |
-| `VOICE_WS_AUTH_TOKEN` | 05 | Token appended to the applet WSS URL; checked at WS upgrade |
-| `DEEPGRAM_API_KEY` | 06 | Deepgram STT auth |
-| `DEEPGRAM_MODEL` | 06 | STT model (`nova-2-phonecall`) |
-| `DEEPGRAM_ENDPOINTING_MS` | 06 | Silence threshold (owns 300 ms of the budget) |
-| `ANTHROPIC_API_KEY` | 07 | Claude auth |
-| `ANTHROPIC_MODEL_REALTIME` | 07 | Fast model for live turns |
+| `BOLNA_API_KEY` | 05 | Bolna API auth (executions fetch, recording download) — **secret** |
+| `BOLNA_AGENT_ID` | 05/06 | The production agent's id |
+| `BOLNA_WEBHOOK_TOKEN` | 08 | Bearer token Bolna sends on identify/tool/post-call; we verify it (constant-time) |
+| `ANTHROPIC_API_KEY` | 07 | Claude auth (post-call summaries + memory distillation from the worker) |
 | `ANTHROPIC_MODEL_SUMMARY` | 07 | Strong model for post-call summaries |
-| `ELEVENLABS_API_KEY` | 08 | TTS auth |
-| `ELEVENLABS_VOICE_ID` | 08 | The assistant's voice |
-| `ELEVENLABS_MODEL_ID` | 08 | `eleven_flash_v2_5` (live) |
-| `ELEVENLABS_OUTPUT_FORMAT` | 08 | `ulaw_8000` (matches Exotel) |
+| `GOOGLE_CALENDAR_ID` | 16 | The calendar `check_calendar` reads |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | 16 | Service-account credentials (read-only calendar scope) |
+| `RESUME_STORAGE_PATH` | 16 | Where `send_resume` finds the resume file |
 | `REDIS_URL` | 13 | `redis://redis:6379` (internal network DNS) |
 | `NODE_ENV` | 09 | **`production`** — JSON logs, terse errors |
 | `LOG_LEVEL` | 09 | **`info`** — the level CloudWatch ships |
@@ -635,7 +636,7 @@ Two distinct secret stores exist in production — do not confuse them.
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 04/10 | Baked into the web image at build |
 | `NEXT_PUBLIC_API_URL` | 10 | `https://api.yourdomain` — baked into the web image at build |
 
-> `NODE_ENV=production` and `LOG_LEVEL=info` are the two values this document *pins* for the box. `NEXT_PUBLIC_*` are not runtime server secrets — they are build-time public values compiled into the browser bundle by CI (doc 13 §2.10, doc 14). Google Calendar and email/notification keys arrive in doc 16 and join this same file.
+> `NODE_ENV=production` and `LOG_LEVEL=info` are the two values this document *pins* for the box. `NEXT_PUBLIC_*` are not runtime server secrets — they are build-time public values compiled into the browser bundle by CI (doc 13 §2.10, doc 14). Note what is **absent** compared with the DIY design: no Deepgram/ElevenLabs/Exotel keys, no voice-tuning knobs — the live voice loop is configured inside Bolna's dashboard (doc 06), not via our env. Email/SMTP keys for `notify_varun` join this same file (doc 16).
 
 **B. GitHub Actions Secrets — deploy plumbing only.** These let CI reach the box; they hold **no vendor keys** (§12). Doc 14 referenced these as forward-declared placeholders — set their **real values now**:
 
@@ -658,14 +659,9 @@ Work top to bottom; each proves a layer of the stack.
 
 1. **Dashboard padlock:** open `https://app.yourdomain` in a browser → the login page loads and the address bar shows a valid padlock (click it → "Connection is secure", issued by Let's Encrypt / R-series). No warning = real TLS (§2.7).
 2. **API health:** `curl -s https://api.yourdomain/health` returns the doc 09 payload (`{"status":"ok",...}`) with HTTP 200. Proves DNS → SG → nginx → api and the cert on `api.` all line up.
-3. **WSS upgrade (the one that gates the product):**
-   ```bash
-   npm i -g wscat
-   wscat -c "wss://api.yourdomain/voice/stream?token=VOICE_WS_AUTH_TOKEN"
-   ```
-   The connection must **upgrade** (wscat prints `Connected`), not error on the TLS handshake. A cert failure here is exactly what would silently kill every Exotel call (§2.8).
-4. **A REAL end-to-end phone call:** from any phone, **dial the ExoPhone** (`EXOTEL_VIRTUAL_NUMBER`). The assistant must answer with the doc 00 greeting: *"Hello. You've reached Varun Gandhi's AI Assistant..."* Speak a sentence; it should respond within ~1.5 s (doc 01 §3.5). **This is the product working** — telephony → WSS → STT → Claude → TTS, on real infrastructure.
-5. **CI/CD loop closed:** make a trivial change on a branch, open a PR, merge to `main`. Watch the doc 14 Actions run build → push → deploy. Then `https://api.yourdomain/health` stays green and `docker compose ... ps` shows the new image tag — an auto-deploy with no dropped calls.
+3. **The webhook surface (the one that gates the product):** run the two smoke curls from §7 — identify **without** a token returns `401`; identify **with** the production `BOLNA_WEBHOOK_TOKEN` returns `200` and the recruiter/memory JSON shape from doc 08. A cert or routing failure here is exactly what would silently blind every Bolna call (§2.8).
+4. **A REAL end-to-end phone call:** from any phone, **dial the Bolna number** (doc 05). The assistant must answer with the doc 00 greeting: *"Hello. You've reached Varun Gandhi's AI Assistant..."* — the scripted welcome message configured in doc 06. Have a short conversation and let it end. **This is the product working** — Bolna's voice loop hitting *your* production webhooks for identify, tools, and post-call.
+5. **CI/CD loop closed:** make a trivial change on a branch, open a PR, merge to `main`. Watch the doc 14 Actions run build → push → deploy. Then `https://api.yourdomain/health` stays green and `docker compose ... ps` shows the new image tag — an auto-deploy with the webhook surface answering throughout.
 6. **CloudWatch shows logs:** CloudWatch → Log groups → `/recruitpilot/prod` contains recent Pino JSON lines from the call in step 4.
 7. **Alarm fires on failure:** `docker compose -f docker-compose.prod.yml kill api` (or stop it). Within the alarm window you get the **SNS email** (StatusCheck/health alarm), and `docker compose ps` shows `restart: unless-stopped` bringing it back (doc 13 §11). Restore with `up -d`.
 8. **Renewal machine proven:** `docker compose ... run --rm certbot renew --dry-run` completes cleanly (§2.7).
@@ -673,9 +669,9 @@ Work top to bottom; each proves a layer of the stack.
 **Self-quiz** (answer from memory):
 
 1. Why an **Elastic IP** — what two external systems break if the server's IP changes?
-2. Why does **WSS require a real (not self-signed) TLS cert**, and what exact symptom appears if `api.`'s cert is invalid?
+2. Why do the **Bolna webhooks require a real (not self-signed) TLS cert**, and what exact symptoms appear on a live call if `api.`'s cert is invalid?
 3. Why a separate **`deploy` user** with its own key instead of CI using the `ubuntu` login or root?
-4. Recap doc 14's **expand-contract** deploy: how does merging to `main` reach this box, and why are no calls dropped?
+4. Recap doc 14's **expand-contract** deploy: how does merging to `main` reach this box, and why does the webhook surface keep answering during the swap?
 5. What does the **$30 billing budget** protect you from, and why set it *before* launching anything?
 6. Why `t3.small` not `t3.micro`, and which metric warns you a `t3` upgrade is due?
 
@@ -689,8 +685,8 @@ Work top to bottom; each proves a layer of the stack.
 4. **Putting the dev `.env` on prod.** `scp`ing your local `.env` means dev and prod **share vendor keys** — one leak, one revocation, and *both* environments die together (shared blast radius). Prod gets freshly-minted keys, hand-entered (§8, §12).
 5. **Forgetting the IAM role → CloudWatch silently ships nothing.** The agent installs and "runs" but has no permission to write; you discover you have zero monitoring during your first incident. Attach `CloudWatchAgentServerPolicy` (§2.10, §5.9).
 6. **Never testing cert renewal.** The 90-day cert expires quietly at 3 a.m. and every `wss://` call fails (§2.8). Run `certbot renew --dry-run` now and know it passes (§2.7).
-7. **`t3` CPU-credit exhaustion.** If something pins the CPU, credits drain and you're throttled to baseline — calls stutter. Watch `CPUCreditBalance`; a sustained drop means upgrade to `t3.medium` (§2.2, §11).
-8. **Leaving the Exotel applet on the dead ngrok URL.** After launch, if you forget §5.8, calls hit a tunnel that no longer exists — the assistant never answers. Repoint to `wss://api.yourdomain/...` and delete ngrok (§5.8).
+7. **`t3` CPU-credit exhaustion.** If something pins the CPU, credits drain and you're throttled to baseline — webhook responses slow, and the identify/tool budgets (doc 08) start blowing on live calls. Watch `CPUCreditBalance`; a sustained drop means upgrade to `t3.medium` (§2.2, §11).
+8. **Leaving the Bolna agent on the dead ngrok URLs.** After launch, if you forget §5.8, the webhooks hit a tunnel that no longer exists — calls still connect (Bolna owns the telephony) but the agent knows no caller, every tool fails, and no post-call data ever lands. Repoint all three URLs to `https://api.yourdomain/webhooks/bolna/...` and delete ngrok (§5.8).
 9. **`docker compose down -v` on the server.** The `-v` destroys the `redis-data` volume — every queued-but-unprocessed job (transcripts, notifications) gone (doc 13 §10). `down` alone, always.
 
 ---
@@ -709,10 +705,10 @@ Work top to bottom; each proves a layer of the stack.
 
 ## 12. Security
 
-- **Separate production keys per vendor.** Every vendor key in the server `.env` is a *new* key minted for production (docs 04–08, 12), distinct from dev. Rotation is then **independent**: revoking a leaked prod Deepgram key touches neither dev nor any other vendor. Shared keys mean shared blast radius (§10 #4).
+- **Separate production keys per vendor.** Every vendor key in the server `.env` is a *new* key minted for production (docs 04–08), distinct from dev — including a freshly generated `BOLNA_WEBHOOK_TOKEN` (`openssl rand -hex 32`, doc 08). Rotation is then **independent**: revoking a leaked prod Bolna key touches neither dev nor any other vendor. Shared keys mean shared blast radius (§10 #4).
 - **`chmod 600` on `/opt/recruitpilot/.env`.** The file holds every production vendor secret — owner-read-only, owned by `deploy`. This box *is* where the secrets live, which makes it the **crown jewel**: everything else here (SG, ufw, SSH hardening) exists to protect this file.
 - **Defence in depth at the network edge.** Two firewalls agree: the AWS **security group** (cloud edge) and **ufw** (host). Both permit only 22/80/443, and 22 only from your IP. Redis is triply protected — no published port (doc 13 §2.9), `internal:true` network, and denied by both firewalls anyway.
-- **No vendor keys in GitHub.** GitHub Secrets hold **only deploy plumbing** (`EC2_HOST/USER/SSH_PRIVATE_KEY` + public `NEXT_PUBLIC_*`). Anthropic/Deepgram/ElevenLabs/Exotel/Supabase keys live *only* on the box (§8). A compromised GitHub account can deploy code but cannot exfiltrate vendor keys.
+- **No vendor keys in GitHub.** GitHub Secrets hold **only deploy plumbing** (`EC2_HOST/USER/SSH_PRIVATE_KEY` + public `NEXT_PUBLIC_*`). Anthropic/Bolna/Supabase/Google keys live *only* on the box (§8). A compromised GitHub account can deploy code but cannot exfiltrate vendor keys.
 - **SSH hardening recap.** Key-only auth (`PasswordAuthentication no`), a dedicated non-root `deploy` user for CI, and the private key held by CI — not sitting on the server (§5.5). No password ever authenticates a shell here.
 - **Automatic security updates.** `unattended-upgrades` closes known OS CVEs without waiting for a human — the internet scans for unpatched boxes constantly.
 - **The EC2 box holds the secrets, so treat it as the crown jewel.** Minimize what can touch it, log what does (CloudWatch), and assume that anyone who gets a shell as a privileged user has everything — which is why non-root containers (doc 13 §12), least-privilege SSH, and the tight SG all compound here.
@@ -733,7 +729,7 @@ Work top to bottom; each proves a layer of the stack.
 - [ ] `/opt/recruitpilot` set up; **production `.env` hand-created, `chmod 600`** (no dev `.env` copied)
 - [ ] `docker login ghcr.io` succeeds; first `docker compose ... up -d` runs; api `(healthy)`
 - [ ] TLS certs issued for `api.` + `app.`; nginx 443 blocks live; `renew --dry-run` passes
-- [ ] Exotel Voicebot applet repointed to `wss://api.yourdomain/voice/stream?token=...`; ngrok retired
+- [ ] Bolna agent's three webhook URLs (identify / tools / post-call) repointed to `https://api.yourdomain/webhooks/bolna/...` with the prod Bearer token; ngrok retired
 - [ ] IAM role `CloudWatchAgentServerPolicy` attached; agent shipping logs to `/recruitpilot/prod` + mem/disk metrics
 - [ ] SNS topic + confirmed email; alarms on Pino errors, `StatusCheckFailed`, disk >80% (and `CPUCreditBalance`)
 - [ ] GitHub secrets `EC2_HOST`, `EC2_USER`, `EC2_SSH_PRIVATE_KEY` set (doc 14 forward-ref resolved)
@@ -744,4 +740,4 @@ Work top to bottom; each proves a layer of the stack.
 
 ## 14. Next Step
 
-Proceed to **`16_AI_AGENT.md`** — with the system now live in Mumbai, we build the brain that runs on it: the **AgentOrchestrator** and its state machine (GREETING → LISTENING → THINKING → SPEAKING → TOOL_CALL → CLOSING), the streaming turn loop, barge-in handling, memory pre-fetch, and the tool registry (`check_calendar`, `send_resume`, `save_recruiter`, `notify_varun`) — the components doc 01 §3.3 sketched, implemented against the Claude and Google Calendar integrations, and deployed through the exact pipeline you just finished wiring.
+Proceed to **`16_AI_AGENT.md`** — with the system now live in Mumbai, revisit the brain that speaks on it: the system prompt and its Bolna dynamic variables (`{{caller_name}}`, `{{memory}}`), the four tools whose handler logic lives behind your production webhook endpoints (`check_calendar`, `send_resume`, `save_recruiter`, `notify_varun`), the memory read/write design, and the three-layer AI-disclosure enforcement — all now running against the exact infrastructure and pipeline you just finished wiring.

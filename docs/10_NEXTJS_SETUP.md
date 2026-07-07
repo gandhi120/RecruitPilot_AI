@@ -9,9 +9,9 @@
 
 Stand up `apps/web` — the **Next.js dashboard**, Varun's one-person cockpit — scaffolded, authenticated, and wired to both halves of its world:
 
-- The app scaffolded **inside the monorepo** as `@recruitpilot/web`, consuming `@recruitpilot/shared` like `apps/api` does (doc 03 §2.4).
+- The app scaffolded **inside the monorepo** as `@recruitpilot/web`, consuming `@recruitpilot/shared` like `apps/api` does (doc 03).
 - **Supabase Auth** working end-to-end with cookie-based sessions: Varun logs in at `/login` with the user created manually in doc 04 §5.5 (signups are disabled — there is no register page, by design).
-- The **three data paths** from doc 01 §3.2 implemented in skeleton form:
+- The **three data paths** from doc 01 implemented in skeleton form:
   1. **Reads** → browser/server → Supabase PostgREST directly, fenced by RLS.
   2. **Live updates** → Supabase Realtime channel subscriptions (`postgres_changes`).
   3. **Commands (mutations)** → typed fetch to the Fastify API via `lib/api.ts`.
@@ -47,7 +47,7 @@ The filesystem *is* the router:
 - `app/calls/page.tsx` → the `/calls` route.
 - `app/calls/[id]/page.tsx` → dynamic route `/calls/abc123` (the `id` param arrives as a prop).
 - `app/layout.tsx` → shared shell that wraps every page (html, body, global styles); nested layouts wrap their subtree only.
-- **Route groups** `(auth)` and `(dashboard)` — folders in parentheses that **organize without affecting the URL**. `app/(auth)/login/page.tsx` is still just `/login`. Why bother? Because groups can have **different layouts**: `(auth)` gets a bare, centered card layout (no nav — you're not logged in yet); `(dashboard)` gets the sidebar + header shell shared by calls/recruiters/settings. This is exactly the tree doc 03 §4 fixed.
+- **Route groups** `(auth)` and `(dashboard)` — folders in parentheses that **organize without affecting the URL**. `app/(auth)/login/page.tsx` is still just `/login`. Why bother? Because groups can have **different layouts**: `(auth)` gets a bare, centered card layout (no nav — you're not logged in yet); `(dashboard)` gets the sidebar + header shell shared by calls/recruiters/settings. This is exactly the tree doc 03 fixed.
 
 ### 2.3 Why SSR matters for an authed dashboard
 
@@ -75,12 +75,12 @@ One subtlety makes **middleware** mandatory: Supabase access tokens are short-li
 
 ### 2.5 The data-access split — reads vs live vs commands
 
-Doc 01 §3.2 fixed this; here is the *why*, spelled out:
+Doc 01 fixed this; here is the *why*, spelled out:
 
 | Path | Route | Mechanism | Why this way |
 |---|---|---|---|
 | **READS** | browser/Next server → Supabase | PostgREST + anon key, RLS-filtered | Reads are shape-simple ("last 20 calls"). Piping them through Fastify adds a hop, a deploy surface, and code that PostgREST already generates. RLS caps the blast radius: even a fully compromised browser reads only what policies grant Varun. |
-| **LIVE** | Supabase Realtime → browser | WebSocket channel, `postgres_changes` events | The worker inserts a `calls` row (doc 01 §3.6) → Postgres replication → Realtime → the open dashboard updates *instantly*, with zero polling code and zero API involvement. |
+| **LIVE** | Supabase Realtime → browser | WebSocket channel, `postgres_changes` events | The worker's `persist-transcript` job (fed by Bolna's post-call webhook, docs 08/17) inserts rows (doc 01) → Postgres replication → Realtime → the open dashboard updates *instantly*, with zero polling code and zero API involvement. |
 | **COMMANDS** | browser → Fastify API | `lib/api.ts` typed fetch, Zod-validated | Mutations carry **business logic** (validation, side effects, events) and may touch **vendor keys** (e.g., re-sending a resume). Both must stay server-side. The browser never holds a privileged credential and never calls a vendor. |
 
 The asymmetry is the design: **Supabase's strengths (auto API, realtime, RLS) own the read/live paths; our API owns every write and every secret.** If you ever find yourself adding a Fastify `GET /calls` endpoint that just proxies the database, or a Supabase `insert()` in a client component — one of the two rules above is being violated.
@@ -119,7 +119,7 @@ flowchart TB
     API -->|"signed URL for recording"| STOR
 ```
 
-Read the trust boundaries off the diagram: the browser holds only the anon key and Varun's session JWT; the Next.js server holds nothing more; **every privileged credential lives in Fastify** (doc 03 §12, doc 04 §3).
+Read the trust boundaries off the diagram: the browser holds only the anon key and Varun's session JWT; the Next.js server holds nothing more; **every privileged credential lives in Fastify** (doc 03, doc 04 §3).
 
 ### 3.2 Login flow (sequence)
 
@@ -147,7 +147,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant W as Worker (persist-transcript job)
+    participant W as Worker (persist-transcript job,<br/>triggered by Bolna's post-call webhook — docs 08/17)
     participant PG as Postgres
     participant RT as Supabase Realtime
     participant H as useRealtimeCalls hook
@@ -166,15 +166,15 @@ sequenceDiagram
 |---|---|---|---|
 | `/login` | `(auth)` | Server shell + client form | Email/password form → `signInWithPassword`. No signup link — signups are disabled (doc 04 §5.5). |
 | `/calls` | `(dashboard)` | Server Component list + client live layer | Call list (time, caller, duration, status), updating live via Realtime. |
-| `/calls/[id]` | `(dashboard)` | Server Component | Full transcript, structured summary, recruiter card, audio player fed by a **short-lived signed URL** (doc 04 §5.6). |
-| `/recruiters` | `(dashboard)` | Server Component | Recruiter memory: who called, when, about what (doc 00 §1 item 7). |
-| `/settings` | `(dashboard)` | Server + client form | Greeting text, predefined screening questions, feature toggles — the **config-over-code surface** from doc 01 §11: Varun edits conversation behavior here, no deploy needed. Saves go through the Fastify API (it's a mutation). |
+| `/calls/[id]` | `(dashboard)` | Server Component | The full Bolna transcript (persisted turn-by-turn by the worker, doc 17), the Claude-generated summary, recruiter card, and an audio player fed by a **short-lived signed URL** to the recording the `store-recording` job downloaded from Bolna into our bucket (docs 04, 08). |
+| `/recruiters` | `(dashboard)` | Server Component | Recruiter memory: who called, when, about what (doc 00). |
+| `/settings` | `(dashboard)` | Server + client form | Greeting text, predefined screening questions, feature toggles — the **config-over-code surface** from doc 01: Varun edits conversation behavior here, no deploy needed. Saves go through the Fastify API (it's a mutation). |
 
 ---
 
 ## 4. Folder Structure
 
-Filling in the `apps/web` subtree fixed by doc 03 §4 — plus the handful of files this doc adds (marked ●):
+Filling in the `apps/web` subtree fixed by doc 03 — plus the handful of files this doc adds (marked ●):
 
 ```
 apps/web/
@@ -209,7 +209,7 @@ apps/web/
 └── tsconfig.json
 ```
 
-Note the import direction (doc 03 §3): `apps/web → @recruitpilot/shared` is legal; `apps/web → apps/api` internals is forbidden — web talks to the API over HTTP only, through `lib/api.ts`.
+Note the import direction (doc 03): `apps/web → @recruitpilot/shared` is legal; `apps/web → apps/api` internals is forbidden — web talks to the API over HTTP only, through `lib/api.ts`.
 
 ---
 
@@ -265,7 +265,7 @@ npm i @supabase/supabase-js @supabase/ssr -w apps/web
 npm install        # re-link workspaces so @recruitpilot/shared resolves
 ```
 
-`-w apps/web` targets the workspace: the dependency lands in `apps/web/package.json`, while npm hoists the actual files to the root `node_modules` (doc 03 §2.4).
+`-w apps/web` targets the workspace: the dependency lands in `apps/web/package.json`, while npm hoists the actual files to the root `node_modules` (doc 03).
 
 ### 5.3 Create `.env.local`
 
@@ -500,7 +500,7 @@ export async function apiFetch<T>(
     },
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-  return schema.parse(await res.json()); // the untyped boundary, closed (doc 02 §10)
+  return schema.parse(await res.json()); // the untyped boundary, closed (doc 02)
 }
 
 // usage — schemas come from the one source of shape truth:
@@ -510,7 +510,7 @@ export async function apiFetch<T>(
 //   });
 ```
 
-Every response is **Zod-parsed with a schema from `@recruitpilot/shared`** — the same schema Fastify validated on its side (doc 03 §4.1). A drifted API contract fails loudly at the parse, not silently three components later. The Fastify side verifies the `Authorization` JWT against Supabase (doc 12).
+Every response is **Zod-parsed with a schema from `@recruitpilot/shared`** — the same schema Fastify validated on its side (doc 03). A drifted API contract fails loudly at the parse, not silently three components later. The Fastify side verifies the `Authorization` JWT against Supabase (doc 12).
 
 ---
 
@@ -533,7 +533,7 @@ Every response is **Zod-parsed with a schema from `@recruitpilot/shared`** — t
 
 ## 7. Commands
 
-All from the **repo root** — the `-w` flag targets the workspace (doc 03 §2.4):
+All from the **repo root** — the `-w` flag targets the workspace (doc 03):
 
 ```bash
 # dev server on :3001 (the -p 3001 lives in the package.json script — apps/api owns :3000)
@@ -565,7 +565,7 @@ Three variables enter `apps/web/.env.local` — **all three `NEXT_PUBLIC_`, all 
 
 What `NEXT_PUBLIC_` *actually does* — and why it's a one-way door: at **build time**, Next.js finds every `process.env.NEXT_PUBLIC_*` reference and **inlines the literal value into the browser JavaScript bundle**. Anyone can read it with View Source. Two consequences:
 
-1. **The prefix is a public declaration, never a convenience** (doc 00 §8). If a value must not appear in a stranger's DevTools, it does not get the prefix — no exceptions, and the service_role key least of all (doc 04 §10 mistake #1).
+1. **The prefix is a public declaration, never a convenience** (doc 00). If a value must not appear in a stranger's DevTools, it does not get the prefix — no exceptions, and the service_role key least of all (doc 04 §10 mistake #1).
 2. **Values are baked at build time, not read at runtime.** Changing them means rebuilding the web image — which is why doc 13 passes them as Docker *build args*, not runtime env.
 
 The anon key passes the test precisely because RLS makes it harmless (doc 04 §2.3); the API URL is public by nature (the browser must reach it anyway).
@@ -607,11 +607,11 @@ npm run build -w apps/web
 ## 10. Common Mistakes
 
 1. **A secret with a `NEXT_PUBLIC_` prefix.** Doc 04's #1 sin, restated because it is the one that ends the project: `NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY` inlines the RLS-bypassing master key into JavaScript served to anyone. The prefix means *published*. Only the three §8 variables ever carry it.
-2. **Calling vendor APIs from the browser.** "Just fetch Anthropic for a quick summary" ships the vendor key to the world (doc 01 §10 mistake #4). The browser talks to exactly two servers: Supabase (anon key) and our Fastify API. Nothing else, ever.
+2. **Calling vendor APIs from the browser.** "Just fetch Anthropic for a quick summary" — or "just hit Bolna's executions API for the recording" — ships a vendor key to the world (doc 01). The browser talks to exactly two servers: Supabase (anon key) and our Fastify API. Nothing else, ever.
 3. **Supabase queries in client components when a Server Component suffices.** A `"use client"` page that fetches in `useEffect` renders empty → hydrates → *then* fetches — a request waterfall plus a loading spinner, for data the server could have streamed fully rendered. Client-side fetching is for *updates* (Realtime), not initial loads.
 4. **Forgetting the middleware.** Everything works — for about an hour. Then the JWT expires, no one refreshes it, and every Supabase call silently returns empty/401 until a manual re-login. If auth "randomly breaks after a while", check the middleware matcher first.
-5. **Importing Node-only code into `packages/shared`.** Shared ships in the browser bundle (doc 03 §10 mistake #5): one `import fs` or Prisma type in it and `next build` dies with a cryptic module-resolution error. Shared = pure Zod schemas, types, constants.
-6. **Fetching without Zod-parsing API responses.** `await res.json()` returns `any` — the untyped boundary doc 02 §10 warned about. A renamed API field then surfaces as `undefined` deep in a component instead of a loud parse error at the boundary. Every `lib/api.ts` call takes a schema; no schema, no fetch.
+5. **Importing Node-only code into `packages/shared`.** Shared ships in the browser bundle (doc 03): one `import fs` or Prisma type in it and `next build` dies with a cryptic module-resolution error. Shared = pure Zod schemas, types, constants.
+6. **Fetching without Zod-parsing API responses.** `await res.json()` returns `any` — the untyped boundary doc 02 warned about. A renamed API field then surfaces as `undefined` deep in a component instead of a loud parse error at the boundary. Every `lib/api.ts` call takes a schema; no schema, no fetch.
 7. **Checking auth with `getSession()` in the middleware instead of `getUser()`.** `getSession()` reads the cookie without validating it against Supabase — a tampered/expired JWT passes. `getUser()` round-trips to GoTrue and is the authoritative check (and triggers the refresh).
 8. **Forgetting `router.refresh()` after login.** The client navigates, but Server Components still hold the pre-login render — dashboards look empty until a hard refresh. `push` moves the URL; `refresh` re-runs the server tree with the new cookies.
 
@@ -634,10 +634,10 @@ The dashboard's posture — thin by design, because the heavy walls are elsewher
 
 - **Session cookies are handled by `@supabase/ssr` defaults** — the auth token cookies are set `httpOnly` where written server-side, `Secure` in production, and `SameSite=Lax`, which blunts both XSS token theft and CSRF-style riding. Do not hand-roll cookie handling around the library; its defaults encode these decisions.
 - **RLS is the floor** (doc 04 §2.2). The threat model to internalize: assume the entire browser bundle, anon key included, is in an attacker's hands — because it literally is, it's public JavaScript. What do they get? Whatever RLS grants an unauthenticated stranger: **nothing**. With Varun's stolen session: whatever RLS grants Varun. The dashboard's security ceiling is set in Postgres, not in React.
-- **No privileged secret exists in this app to leak.** No service_role key, no vendor keys, no `DATABASE_URL` — by structure (doc 03 §12), not by carefulness. A full compromise of `apps/web` yields the anon key and nothing more.
+- **No privileged secret exists in this app to leak.** No service_role key, no `BOLNA_API_KEY`, no `ANTHROPIC_API_KEY`, no `DATABASE_URL` — by structure (doc 03), not by carefulness. A full compromise of `apps/web` yields the anon key and nothing more.
 - **Content-Security-Policy.** Add a CSP header (via `next.config.ts` `headers()` or Nginx in doc 15) restricting `connect-src` to `'self'`, the Supabase project domain, and the API domain; `script-src 'self'`. It turns "attacker injected a script" into "…which couldn't call home." Noted here, finalized with the rest of the headers in docs 15/18.
-- **No PII in client-side logs or analytics.** Transcripts, recruiter names, and phone numbers are personal data (doc 00 §12). No third-party analytics script gets added to this app, and `console.log` of call payloads doesn't ship — browser logs are visible to extensions and shoulder-surfers alike.
-- **Recording playback uses short-expiry signed URLs** (doc 04 §5.6): the `/calls/[id]` audio player asks our API, which mints a signed URL valid for minutes, not days. The permanent storage path never reaches the browser; a shared or leaked link dies on schedule.
+- **No PII in client-side logs or analytics.** Transcripts, recruiter names, and phone numbers are personal data (doc 00). No third-party analytics script gets added to this app, and `console.log` of call payloads doesn't ship — browser logs are visible to extensions and shoulder-surfers alike.
+- **Recording playback uses short-expiry signed URLs** (doc 04 §5.6): the `/calls/[id]` audio player asks our API, which mints a signed URL (valid for minutes, not days) to *our* stored copy of the recording — never Bolna's raw recording URL, which is vendor-side and outside our access controls (docs 08, 18). The permanent storage path never reaches the browser; a shared or leaked link dies on schedule.
 
 ---
 

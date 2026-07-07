@@ -45,7 +45,7 @@ export async function buildApp() {
       info: {
         title: "RecruitPilot AI — API",
         description:
-          "Voice gateway, agent, and dashboard API. Contracts defined by Zod schemas in packages/shared.",
+          "Bolna webhooks (caller identify, tools, post-call), async jobs, and dashboard API. Contracts defined by Zod schemas in packages/shared.",
         version: "0.0.0",
       },
       tags: [{ name: "system", description: "Health & readiness" }],

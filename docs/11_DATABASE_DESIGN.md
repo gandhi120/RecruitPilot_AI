@@ -10,10 +10,10 @@
 Turn the empty Postgres from doc 04 into the system's **single source of truth** — designed, migrated, secured, and seeded:
 
 - The **complete data model**: nine entities (recruiters, calls, transcripts, summaries, opportunities, memories, notifications, settings, tool invocations) with every relationship, cardinality, and index justified — not just listed.
-- **Prisma** wired up correctly for Supabase: one `schema.prisma` at the repo root (doc 03 §11), runtime queries through the pooler (`DATABASE_URL` :6543), migrations through the direct connection (`DIRECT_URL` :5432) — the "6543 = the app talking, 5432 = the schema changing" rule from doc 04 §2.4, now enforced in the schema file itself.
-- **RLS enabled on every table** with SELECT-only policies for Varun's dashboard — honoring doc 04 §2.2's rule ("a table without RLS is a bug, not a default") and the trust boundary from doc 03 §12.
-- **Realtime enabled** on `calls` and `transcript_entries` so the dashboard updates live (doc 00 §5.1 step 9).
-- A **seed script** installing the default settings: the greeting text and the predefined recruiter questions — the config-over-code surface from doc 01 §11.
+- **Prisma** wired up correctly for Supabase: one `schema.prisma` at the repo root (doc 03), runtime queries through the pooler (`DATABASE_URL` :6543), migrations through the direct connection (`DIRECT_URL` :5432) — the "6543 = the app talking, 5432 = the schema changing" rule from doc 04 §2.4, now enforced in the schema file itself.
+- **RLS enabled on every table** with SELECT-only policies for Varun's dashboard — honoring doc 04 §2.2's rule ("a table without RLS is a bug, not a default") and the trust boundary from doc 03.
+- **Realtime enabled** on `calls` and `transcript_entries` so the dashboard updates live (doc 00).
+- A **seed script** installing the default settings: the greeting text and the predefined recruiter questions — the config-over-code surface from doc 01.
 
 By the end, `npx prisma studio` shows your schema, the Supabase Table Editor shows nine RLS-protected tables, and you can defend every column in an interview.
 
@@ -35,7 +35,7 @@ Why care: duplicated facts drift. If the recruiter's name lived on each `Call` r
 
 **When to denormalize — deliberately, with a reason written down.** Normalization optimizes for *write correctness*; sometimes you trade a little of it for *read speed*:
 
-- `Recruiter.callCount` and `Recruiter.lastCalledAt` are **derivable** (`COUNT(*)`/`MAX(startedAt)` over calls) — but the memory pre-fetch at call start (doc 01 §3.5) and the dashboard recruiter list read them constantly. We store them as counters, updated by the `upsert-recruiter` job. Accepted cost: a job bug could let them drift; a periodic reconciliation query catches that.
+- `Recruiter.callCount` and `Recruiter.lastCalledAt` are **derivable** (`COUNT(*)`/`MAX(startedAt)` over calls) — but the identify webhook's caller lookup at call start (<500ms budget, docs 01/08) and the dashboard recruiter list read them constantly. We store them as counters, updated by the `upsert-recruiter` job. Accepted cost: a job bug could let them drift; a periodic reconciliation query catches that.
 - The **summary text** could be denormalized onto `Call` to save a join. We keep a separate `Summary` table instead, because a summary has its own lifecycle (model id, token count, regeneration) — but this was a judgment call, not a law. Know the trade-off; choose consciously.
 
 One exception to "each fact once" that is *not* denormalization: Postgres arrays. `Opportunity.techStack text[]` looks like a 1NF violation, but for a short tag list that is only ever read whole (never joined against), a normalized `opportunity_tech_stacks` join table is ceremony without benefit. Arrays are fine for tags; wrong for anything you'd JOIN or FK.
@@ -52,11 +52,11 @@ Two ways to mint primary keys:
 | Generated where | Only by the DB (needs a round trip) | Anywhere — DB, API, even before insert |
 | Size / index locality | 4–8 bytes, sequential (cache-friendly) | 16 bytes, random (slightly worse index locality) |
 
-**We choose UUIDs**, generated *in the database* with `gen_random_uuid()` (built into Postgres 13+). Reasons ranked: (1) IDs appear in domain events, BullMQ payloads, and dashboard URLs — they must be non-guessable; (2) rows inserted from the SQL editor or a seed still get valid IDs because the DB mints them, not the client; (3) the index-locality cost is irrelevant at our row counts. Note the one ID we *don't* mint: `Call.callSid` comes from **Exotel** — it is the correlation ID that threads through every log line, job, and row (doc 01 §3.8). Our `Call.id` is the internal PK; `callSid` is the external identity, held `UNIQUE`.
+**We choose UUIDs**, generated *in the database* with `gen_random_uuid()` (built into Postgres 13+). Reasons ranked: (1) IDs appear in domain events, BullMQ payloads, and dashboard URLs — they must be non-guessable; (2) rows inserted from the SQL editor or a seed still get valid IDs because the DB mints them, not the client; (3) the index-locality cost is irrelevant at our row counts. Note the one ID we *don't* mint: `Call.executionId` comes from **Bolna** — every call gets an execution id from the platform, and it is the correlation ID that threads through every webhook, log line, job, and row (doc 01). Our `Call.id` is the internal PK; `executionId` is the external identity, held `UNIQUE`.
 
 ### 2.3 Soft delete vs hard delete
 
-**Soft delete** sets a `deletedAt` timestamp and filters it out everywhere; **hard delete** removes the row. Soft delete preserves history and enables undo — and it is the wrong default here, for one decisive reason: doc 00 §12 promises recruiter PII is **deletable on request**. A soft-deleted transcript still *contains* the transcript. "Deleted" that a `WHERE deletedAt IS NULL` clause can un-delete is not deletion under any privacy regime.
+**Soft delete** sets a `deletedAt` timestamp and filters it out everywhere; **hard delete** removes the row. Soft delete preserves history and enables undo — and it is the wrong default here, for one decisive reason: doc 00 promises recruiter PII is **deletable on request**. A soft-deleted transcript still *contains* the transcript. "Deleted" that a `WHERE deletedAt IS NULL` clause can un-delete is not deletion under any privacy regime.
 
 Our policy:
 
@@ -80,7 +80,7 @@ Every table carries `createdAt` (default `now()`) and `updatedAt` (Prisma `@upda
 
 `jsonb` stores structured JSON, binary-encoded, queryable (`costBreakdown->>'llmTokensOut'`). We use it exactly where the shape is **genuinely variable or vendor-defined**:
 
-- `Call.costBreakdown` — the per-call cost telemetry from doc 02 §11 (`sttSeconds`, `llmTokensIn/Out/Cached`, `ttsCharacters`, `telephonyMinutes`). New meters will appear as vendors change; a jsonb blob absorbs that without migrations.
+- `Call.costBreakdown` — the per-call cost telemetry from doc 02 (`bolnaMinutes`, `bolnaCostUsd` when the post-call payload or executions API exposes it — verify against https://www.bolna.ai/docs — plus our own `summaryTokensIn/Out/Cached` from the Claude summary job). New meters will appear as vendors change; a jsonb blob absorbs that without migrations.
 - `ToolInvocation.argsJson` / `resultJson` — every tool has a different argument shape; this is an audit trail, not a query target.
 - `Setting.value` — greeting text, question lists, feature flags: heterogeneous by design.
 - `Summary.keyPoints` — an LLM-produced list whose shape we may evolve.
@@ -89,7 +89,7 @@ The danger is **schema drift**: jsonb columns silently accumulate three generati
 
 ### 2.7 Indexing theory — what, when, and the rule
 
-**What an index is:** a B-tree — a sorted, balanced lookup structure maintained alongside the table. Without one, `WHERE call_sid = 'abc'` is a **sequential scan**: Postgres reads every row (fine at 100 rows, a disaster at 1M). With one, it's a tree descent: ~3–4 page reads regardless of table size.
+**What an index is:** a B-tree — a sorted, balanced lookup structure maintained alongside the table. Without one, `WHERE execution_id = 'abc'` is a **sequential scan**: Postgres reads every row (fine at 100 rows, a disaster at 1M). With one, it's a tree descent: ~3–4 page reads regardless of table size.
 
 **When Postgres actually uses it:** the planner weighs estimated costs using table statistics. It uses an index when the predicate is *selective* (matches few rows) and skips it when a seq scan is cheaper (tiny tables, or predicates matching most rows — an index on a boolean that's 95% `true` is dead weight). Indexes are not free: every `INSERT`/`UPDATE` must also update every index on the table (write amplification), and each consumes disk and cache.
 
@@ -131,15 +131,16 @@ erDiagram
     }
     CALL {
         uuid id PK
-        text call_sid UK "Exotel id — correlation ID (doc 01 s3.8)"
+        text execution_id UK "Bolna execution id — correlation ID (doc 01)"
         uuid recruiter_id FK "nullable until caller identified"
         enum direction "inbound|outbound"
         enum status "ringing|in_progress|completed|failed|dropped"
         timestamptz started_at
         timestamptz ended_at "nullable"
         int duration_seconds "nullable"
-        text recording_path "Supabase Storage key, nullable"
-        jsonb cost_breakdown "doc 02 s11 cost telemetry"
+        text recording_url "Bolna recording URL from post-call payload, nullable"
+        text storage_path "OUR Supabase Storage key, nullable"
+        jsonb cost_breakdown "doc 02 cost telemetry"
         text ended_reason "nullable"
     }
     TRANSCRIPT_ENTRY {
@@ -208,19 +209,20 @@ erDiagram
 
 Design decisions worth defending out loud:
 
-- **`Call.recruiterId` is nullable.** A call row is created at ring time, when the caller is just a phone number. The `upsert-recruiter` job links it once identity is established. A NOT NULL FK here would force fake recruiters or delayed call rows — both worse.
-- **`TranscriptEntry` is a table, not one text blob on `Call`.** Three reasons: (1) *querying* — "show every turn where the caller mentioned compensation" is SQL over rows, string surgery over a blob; (2) *Realtime streaming* — each inserted turn is one `postgres_changes` event, so the dashboard renders the conversation live, turn by turn, with zero polling; (3) *per-turn timings* — `startMs`/`endMs` per turn feed the latency-budget regression reports (doc 01 §11). A blob gives you none of these.
-- **`Summary.callId` is UNIQUE** — one summary per call, and a natural idempotency guard: a retried `generate-summary` job upserts instead of duplicating (doc 01 §3.6).
-- **`Memory` is per-recruiter, keyed for the pre-fetch rule.** At call start the gateway looks up `recruiters` by `phone`, then loads that recruiter's memories in the same breath — *before* the first turn, never per-turn (the doc 01 §3.5 pre-fetch rule; per-turn DB reads on the real-time plane are an architecture violation). `sourceCallId` records provenance ("where did we learn this?"); `expiresAt` lets time-bound facts ("on vacation until March") age out.
-- **`ToolInvocation` is the function-calling audit trail** (doc 16): every `check_calendar`/`send_resume` call the agent made, with arguments, result, and duration. When the agent "said it sent the resume" but no email arrived, this table answers what actually happened.
-- **`Setting` is a key-value table**, not columns — greeting text, the predefined questions list, feature flags. This is doc 01 §11's config-over-code surface: Varun edits behavior in the dashboard; no deploy.
+- **`Call.recruiterId` is nullable.** A call row may be created before the caller is anyone but a phone number (an unknown caller returns empty dynamic variables from the identify webhook). The `upsert-recruiter` job links it once identity is established. A NOT NULL FK here would force fake recruiters or delayed call rows — both worse.
+- **`Call` stores two recording fields.** `recordingUrl` is Bolna's URL from the post-call payload — useful immediately, but vendor-side and outside our retention control. `storagePath` is *our* copy: the `store-recording` job downloads from `recordingUrl` into the private `recordings` bucket (doc 04) and fills this in. The dashboard always plays from `storagePath` via signed URLs; `recordingUrl` is the source, not the product.
+- **`TranscriptEntry` is a table, not one text blob on `Call`.** Three reasons: (1) *querying* — "show every turn where the caller mentioned compensation" is SQL over rows, string surgery over a blob; (2) *Realtime* — when the `persist-transcript` job writes the turns after the post-call webhook, each insert is one `postgres_changes` event and the call page fills in without a refresh; (3) *per-turn timings* — `startMs`/`endMs` stay nullable and are populated only if Bolna's transcript payload provides offsets (verify against https://www.bolna.ai/docs). A blob gives you none of these.
+- **`Summary.callId` is UNIQUE** — one summary per call, and a natural idempotency guard: a retried `generate-summary` job upserts instead of duplicating (doc 01).
+- **`Memory` is per-recruiter, keyed for the identify webhook.** At call start Bolna hits `GET /webhooks/bolna/identify` with the caller's number; we look up `recruiters` by `phone` and load that recruiter's memories in the same breath — one indexed read inside the <500ms budget (docs 01/08). The returned JSON becomes the agent's `{{memory}}` variables. `sourceCallId` records provenance ("where did we learn this?"); `expiresAt` lets time-bound facts ("on vacation until March") age out.
+- **`ToolInvocation` is the function-calling audit trail** (docs 08/16): every `check_calendar`/`send_resume` call Bolna made against our tool endpoints, with arguments, result, and duration. When the agent "said it sent the resume" but no email arrived, this table answers what actually happened.
+- **`Setting` is a key-value table**, not columns — greeting text, the predefined questions list, feature flags. This is doc 01's config-over-code surface: Varun edits behavior in the dashboard; no deploy.
 
 ### 3.2 The Prisma schema
 
 The complete `prisma/schema.prisma`. Conventions applied throughout: fields are camelCase in TypeScript but mapped to snake_case columns (`@map`) and snake_case table names (`@@map`) — because RLS policies, Realtime publications, and SQL-editor debugging all speak SQL, and unquoted lowercase identifiers keep that SQL sane; every table gets `createdAt`/`updatedAt` as `timestamptz` (§2.5); IDs are DB-generated UUIDs (§2.2).
 
 ```prisma
-// prisma/schema.prisma — single source of DB truth (doc 03 §11)
+// prisma/schema.prisma — single source of DB truth (doc 03)
 
 generator client {
   provider = "prisma-client-js"
@@ -305,19 +307,20 @@ model Recruiter {
 ```
 
 ```prisma
-// ---------- Call — one row per phone call; callSid is the correlation ID ----------
+// ---------- Call — one row per phone call; executionId is the correlation ID ----------
 
 model Call {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  callSid         String        @unique @map("call_sid") // Exotel CallSid (doc 01 §3.8) — UNIQUE = webhook idempotency
+  executionId     String        @unique @map("execution_id") // Bolna execution id (doc 01) — UNIQUE = webhook idempotency
   recruiterId     String?       @map("recruiter_id") @db.Uuid // null until caller identified
   direction       CallDirection @default(inbound)
   status          CallStatus    @default(ringing)
   startedAt       DateTime      @default(now()) @map("started_at") @db.Timestamptz(6)
   endedAt         DateTime?     @map("ended_at") @db.Timestamptz(6)
   durationSeconds Int?          @map("duration_seconds")
-  recordingPath   String?       @map("recording_path") // Storage KEY (recordings/<callSid>.wav) — never audio bytes (§10)
-  costBreakdown   Json?         @map("cost_breakdown") // { sttSeconds, llmTokensIn, llmTokensOut, llmTokensCached, ttsCharacters, telephonyMinutes } — doc 02 §11; Zod-validated (§2.6)
+  recordingUrl    String?       @map("recording_url") // Bolna's recording URL (post-call payload) — source only
+  storagePath     String?       @map("storage_path") // OUR Storage KEY (recordings/<executionId>) — never audio bytes (§10)
+  costBreakdown   Json?         @map("cost_breakdown") // { bolnaMinutes?, bolnaCostUsd?, summaryTokensIn/Out/Cached } — doc 02; Zod-validated (§2.6)
   endedReason     String?       @map("ended_reason") // e.g. caller_hangup, provider_error, max_duration
   createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -337,14 +340,14 @@ model Call {
 ```
 
 ```prisma
-// ---------- TranscriptEntry — one row per turn (§3.1: query, stream, time) ----------
+// ---------- TranscriptEntry — one row per turn (§3.1: query, realtime, time) ----------
 
 model TranscriptEntry {
   id        String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   callId    String         @map("call_id") @db.Uuid
   role      TranscriptRole
   content   String         @db.Text
-  startMs   Int?           @map("start_ms") // offset from call start
+  startMs   Int?           @map("start_ms") // offset from call start — only if Bolna's transcript provides it
   endMs     Int?           @map("end_ms")
   sequence  Int            // turn order within the call
   createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -406,7 +409,7 @@ model Opportunity {
 ```
 
 ```prisma
-// ---------- Memory — what the assistant remembers per recruiter (doc 00 §1.7) ----------
+// ---------- Memory — what the assistant remembers per recruiter (doc 00) ----------
 
 model Memory {
   id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -421,7 +424,7 @@ model Memory {
   recruiter  Recruiter @relation(fields: [recruiterId], references: [id], onDelete: Cascade)
   sourceCall Call?     @relation(fields: [sourceCallId], references: [id], onDelete: SetNull)
 
-  @@index([recruiterId]) // the call-start pre-fetch (doc 01 §3.5)
+  @@index([recruiterId]) // the identify webhook's memory read (docs 01/08)
   @@index([sourceCallId]) // FK
   @@map("memories")
 }
@@ -448,7 +451,7 @@ model Notification {
 ```
 
 ```prisma
-// ---------- Setting — config over code (doc 01 §11) ----------
+// ---------- Setting — config over code (doc 01) ----------
 
 model Setting {
   key       String   @id // e.g. greeting_text, predefined_questions, feature_flags
@@ -461,7 +464,7 @@ model Setting {
 ```
 
 ```prisma
-// ---------- ToolInvocation — audit trail of agent function calls (doc 16) ----------
+// ---------- ToolInvocation — audit trail of the agent's tool-webhook calls (docs 08/16) ----------
 
 model ToolInvocation {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -486,15 +489,15 @@ Applying §2.7's rule (every FK + every WHERE/ORDER BY we actually run):
 
 | Index | Kind | The query it serves |
 |---|---|---|
-| `recruiters(phone)` | UNIQUE | Caller identification at call start — the phone lookup that loads memory *before* turn 1 (doc 01 §3.5) |
-| `calls(call_sid)` | UNIQUE | Webhook idempotency (doc 01 §3.6): a duplicate Exotel webhook hits the constraint and upserts instead of creating a second call row |
+| `recruiters(phone)` | UNIQUE | The identify webhook's caller lookup at call start — the phone → recruiter+memory read that must fit the <500ms budget (docs 01/08) |
+| `calls(execution_id)` | UNIQUE | Webhook idempotency (doc 01): a duplicate Bolna post-call webhook hits the constraint and upserts instead of creating a second call row |
 | `calls(recruiter_id, started_at DESC)` | composite | Dashboard recruiter detail: "this recruiter's calls, newest first" — leftmost-prefix also covers plain FK joins |
 | `calls(started_at DESC)` | b-tree | Dashboard home: global call list, newest first |
 | `transcript_entries(call_id, sequence)` | UNIQUE composite | Ordered transcript fetch for the call detail page; doubles as idempotency for retried `persist-transcript` jobs |
 | `summaries(call_id)` | UNIQUE | One summary per call; the call-detail join |
 | `opportunities(status)` | b-tree | Dashboard triage board (`WHERE status = 'new'`) |
 | `opportunities(recruiter_id)`, `opportunities(call_id)` | b-tree | FK joins + cascading deletes (§12 erasure) |
-| `memories(recruiter_id)` | b-tree | The call-start memory pre-fetch |
+| `memories(recruiter_id)` | b-tree | The identify webhook's memory read |
 | `memories(source_call_id)` | b-tree | FK |
 | `notifications(call_id)` | b-tree | FK; call-detail delivery status |
 | `tool_invocations(call_id, sequence)` | UNIQUE composite | Ordered tool audit trail per call |
@@ -520,7 +523,7 @@ Three facts to internalize:
 
 ### 3.5 The Repository Pattern — Prisma stops at the boundary
 
-Doc 03 §4.1 fixed the shape: `routes → service → repository`, and the repository is the **only** file in a feature that imports Prisma. Equally important is what comes *out* of a repository — domain/shared types, never Prisma types (doc 03 §10.2):
+Doc 03 fixed the shape: `routes → service → repository`, and the repository is the **only** file in a feature that imports Prisma. Equally important is what comes *out* of a repository — domain/shared types, never Prisma types (doc 03):
 
 ```typescript
 // apps/api/src/features/calls/calls.repository.ts
@@ -551,13 +554,13 @@ Our database has **two kinds of clients** with opposite trust levels (doc 04 §3
 | `apps/api` + worker (Prisma) | `DATABASE_URL` (pooler) | `postgres` | **No — bypasses RLS** (table owner / superuser-like) |
 | `apps/web` (browser) | PostgREST + anon key + Varun's JWT | `anon` → `authenticated` | **Yes — fully bound** |
 
-Prisma connects as the `postgres` role, which **bypasses RLS entirely**. That is correct, not a hole: the api and worker are trusted by structure (doc 03 §12) — they hold the service credentials, they enforce business rules in code, and they must write freely on the async plane. RLS was never meant to constrain them.
+Prisma connects as the `postgres` role, which **bypasses RLS entirely**. That is correct, not a hole: the api and worker are trusted by structure (doc 03) — they hold the service credentials, they enforce business rules in code, and they must write freely on the async plane. RLS was never meant to constrain them.
 
 So why bother with RLS at all, if our main DB client ignores it? Because of the *other* client. The browser talks to PostgREST directly with the anon key, and doc 04 §2.2 established that **RLS is the only thing** between a compromised browser bundle and the recruiter database. Hence the strategy, stated as rules:
 
 1. **Enable RLS on ALL nine tables** — including `memories` and `tool_invocations`, which the dashboard doesn't read. RLS enabled + no policy = nobody reads via PostgREST — fail closed. This matters more than it looks: tables created by Prisma migrations get Supabase's default *grants* to `anon`/`authenticated`, so a Prisma-created table **without RLS is readable by anyone holding the anon key**. Doc 04 §2.2 warned exactly this: dashboard-created tables default RLS on; SQL/Prisma-created tables do not.
 2. **SELECT-only policies for `authenticated`** on the read tables: `calls`, `transcript_entries`, `summaries`, `recruiters`, `opportunities`, `notifications`, `settings`. With public signups disabled (doc 04 §5.5), the only `authenticated` user that can exist is Varun — so `USING (true)` is safe here. (Extra-defensive variant: pin `USING (auth.uid() = '<varun-user-uuid>')` using the UUID you noted in doc 04 §5.5 step 5.)
-3. **NO insert/update/delete policies for the web — ever.** All mutations flow through the Fastify API (which bypasses RLS as `postgres`). The dashboard's "archive opportunity" button calls our API; the API validates and writes. Business logic stays server-side (doc 01 §3.2), and the browser physically *cannot* write, no matter what its JavaScript is convinced to do.
+3. **NO insert/update/delete policies for the web — ever.** All mutations flow through the Fastify API (which bypasses RLS as `postgres`). The dashboard's "archive opportunity" button calls our API; the API validates and writes. Business logic stays server-side (doc 01), and the browser physically *cannot* write, no matter what its JavaScript is convinced to do.
 
 The policies as SQL — three shown, the rest identical in shape:
 
@@ -594,8 +597,8 @@ CREATE POLICY "authenticated_read_settings"
 
 Doc 04 §5.7 deferred this until tables exist. Now they do. Realtime streams row changes by logical replication, and only tables added to the `supabase_realtime` publication flow. Two live surfaces need it:
 
-- `calls` — the dashboard call list updates the moment a call starts/ends;
-- `transcript_entries` — the call detail page renders the conversation turn-by-turn as the worker persists it.
+- `calls` — the dashboard call list updates the moment the post-call pipeline writes or updates a call row;
+- `transcript_entries` — the call detail page fills in the conversation turn-by-turn as the `persist-transcript` job writes it (docs 08/17).
 
 ```sql
 ALTER PUBLICATION supabase_realtime ADD TABLE public.calls;
@@ -648,7 +651,7 @@ npm i @prisma/client -w apps/api     # the runtime client (api + worker import t
 npm i -D tsx -w apps/api             # TS runner for the seed script (§5.8)
 ```
 
-Installed into the `apps/api` workspace per doc 03 §11 ("generated client is a dependency of api only") — npm hoists them so the root-level `prisma/` schema and CLI commands still resolve.
+Installed into the `apps/api` workspace per doc 03 ("generated client is a dependency of api only") — npm hoists them so the root-level `prisma/` schema and CLI commands still resolve.
 
 ### 5.2 Initialize — and adjust
 
@@ -713,7 +716,7 @@ Dashboard → **Database** → **Replication** (or **Publications** — verify i
 
 ### 5.8 Seed the default settings
 
-The assistant's configurable surface (doc 01 §11) must exist before the first call: the greeting (doc 00's hard product requirement) and the predefined screening questions (doc 00 §1.4). Create `prisma/seed.ts`:
+The assistant's configurable surface (doc 01) must exist before the first call: the greeting (doc 00's hard product requirement — the same text you will configure as Bolna's scripted welcome message in doc 06; this Setting row is the canonical copy the dashboard edits) and the predefined screening questions (doc 00). Create `prisma/seed.ts`:
 
 ```typescript
 // prisma/seed.ts — default Settings rows; idempotent (upsert, never clobber edits)
@@ -767,7 +770,7 @@ npx prisma db seed
 # expect: Seeded 3 settings.
 ```
 
-Note `update: {}` — the seed is **idempotent by design**: re-running it (and `migrate dev` auto-runs it after a reset) never overwrites greeting text Varun edited in the dashboard. Same idempotency discipline as the jobs (doc 01 §3.6), applied to ops tooling.
+Note `update: {}` — the seed is **idempotent by design**: re-running it (and `migrate dev` auto-runs it after a reset) never overwrites greeting text Varun edited in the dashboard. Same idempotency discipline as the jobs (doc 01), applied to ops tooling.
 
 ### 5.9 Tour the data in Prisma Studio
 
@@ -776,7 +779,7 @@ npx prisma studio
 # opens http://localhost:5555
 ```
 
-Studio is a local GUI over your schema (it connects via `DATABASE_URL` — runtime path, so it works through the pooler). Click through: **Setting** shows your three seeded rows — open `predefined_questions` and see the jsonb structure; **Call** is empty (the first row arrives in doc 17); note how relation fields render as links between models. Studio is your dev-time inspection tool; the Supabase Table Editor is its cloud twin. Close it with `Ctrl+C` when done.
+Studio is a local GUI over your schema (it connects via `DATABASE_URL` — runtime path, so it works through the pooler). Click through: **Setting** shows your three seeded rows — open `predefined_questions` and see the jsonb structure; **Call** is empty (the first row arrives with the first live call in doc 17); note how relation fields render as links between models. Studio is your dev-time inspection tool; the Supabase Table Editor is its cloud twin. Close it with `Ctrl+C` when done.
 
 ---
 
@@ -874,27 +877,28 @@ The failed INSERT is the important one: it proves the web plane is read-only by 
 
 **5. Seed ran** — `npx prisma studio` → Setting model → three rows: `greeting_text`, `predefined_questions`, `feature_flags`; the greeting text matches doc 00's hard requirement word for word.
 
-**6. Idempotency guard works** — in the SQL editor, insert a call twice with the same `call_sid`; the second must fail with a unique-constraint violation. That constraint is what doc 01 §3.6's idempotent webhook handling leans on.
+**6. Idempotency guard works** — in the SQL editor, insert a call twice with the same `execution_id`; the second must fail with a unique-constraint violation. That constraint is what doc 01's idempotent webhook handling (and doc 08's duplicate post-call defense) leans on.
 
 **Self-quiz** (pass = answer from memory):
 
 1. Why two connection URLs — which one do migrations use, and what specifically breaks if they go through the pooler? (Direct :5432; advisory locks + session state die under transaction pooling.)
 2. Prisma bypasses RLS — so why do we enable RLS on every table anyway? (The *other* client: the browser reads via PostgREST with the anon key; RLS is the only wall, and Prisma-created tables are granted to anon by default.)
-3. Why is `TranscriptEntry` a table instead of one text column on `Call`? (Querying per turn, Realtime streaming turn-by-turn, per-turn latency timings.)
-4. Where does the per-call cost telemetry live, and what shape is it? (`calls.cost_breakdown` jsonb — sttSeconds, llmTokens in/out/cached, ttsCharacters, telephonyMinutes — Zod-validated at boundaries.)
-5. Why must PII deletion be hard delete, not soft? (Doc 00 §12: deletable on request; a soft-deleted transcript still contains the transcript.)
-6. What single constraint prevents a duplicate Exotel webhook from creating a duplicate call row? (`calls.call_sid UNIQUE`.)
+3. Why is `TranscriptEntry` a table instead of one text column on `Call`? (Querying per turn, Realtime updates as the worker writes turns, optional per-turn timings.)
+4. Where does the per-call cost telemetry live, and what shape is it? (`calls.cost_breakdown` jsonb — Bolna minutes/cost plus our summary-model tokens — Zod-validated at boundaries.)
+5. Why must PII deletion be hard delete, not soft? (Doc 00: deletable on request; a soft-deleted transcript still contains the transcript.)
+6. What single constraint prevents a duplicate Bolna post-call webhook from creating a duplicate call row? (`calls.execution_id UNIQUE`.)
+7. Why does `Call` carry both `recordingUrl` and `storagePath`? (Bolna's URL is the vendor-side source; our Storage copy is what the dashboard plays, under our retention and signed-URL rules.)
 
 ---
 
 ## 10. Common Mistakes
 
 1. **Running migrations through the pooler.** Point `migrate` at :6543 and you get advisory-lock failures, hanging DDL, or `prepared statement` ghosts — often *intermittently*, which is worse. The `directUrl` field exists so this can never happen by accident; set it in §5.2 and forget it.
-2. **Leaking Prisma types out of repositories.** `Promise<Prisma.CallGetPayload<{include:{recruiter:true}}>>` in a service signature welds the whole app to the ORM. Map to shared/domain types at the repository boundary — doc 03 §10.2, enforced in review.
+2. **Leaking Prisma types out of repositories.** `Promise<Prisma.CallGetPayload<{include:{recruiter:true}}>>` in a service signature welds the whole app to the ORM. Map to shared/domain types at the repository boundary — doc 03's rule, enforced in review.
 3. **Forgetting RLS on a new table.** Add a table in a later migration, skip the `ENABLE ROW LEVEL SECURITY` + policy lines, and one of two failures follows: the dashboard mysteriously can't read it (annoying), or — because Prisma-created tables carry default grants — the anon key *can* read it (a leak). New table = RLS + policy in the same migration, every time. The dashboard's table-level RLS badges are your visual audit.
-4. **One giant transcript text column.** It "works" until you want live turn-by-turn streaming, per-turn timings, or a query over caller utterances — then you're regex-parsing your own database. Rows per turn from day one (§3.1).
-5. **No unique constraint on `callSid`.** Exotel retries webhooks (vendors retry — doc 00 §11); without the unique, every retry mints a duplicate call row, and every downstream job runs twice. Doc 01 §3.6's idempotency is *implemented* by this constraint plus upserts. It is load-bearing, not decorative.
-6. **Storing audio in the database.** A `bytea` column of μ-law audio bloats the DB (0.5 MB/min — doc 04 §11), wrecks backups, and buys nothing. Audio lives in the private `recordings` bucket (doc 04 §5.6); the DB stores the Storage *key* (`calls.recording_path`) and the API mints signed URLs for playback.
+4. **One giant transcript text column.** It "works" until you want turn-by-turn rendering, Realtime updates as the worker writes, or a query over caller utterances — then you're regex-parsing your own database. Rows per turn from day one (§3.1).
+5. **No unique constraint on `executionId`.** Bolna may retry the post-call webhook (vendors retry — doc 00); without the unique, every retry mints a duplicate call row, and every downstream job runs twice. Doc 01's idempotency is *implemented* by this constraint plus upserts. It is load-bearing, not decorative.
+6. **Storing audio in the database.** A `bytea` column of call audio bloats the DB (roughly 0.5–1 MB/min — doc 04), wrecks backups, and buys nothing. The `store-recording` job downloads Bolna's file into the private `recordings` bucket (doc 04); the DB stores the Storage *key* (`calls.storage_path`) plus Bolna's source URL (`calls.recording_url`), and the API mints signed URLs for playback.
 7. **Enum changes without migration awareness.** Renaming or removing a Postgres enum value is not a one-liner — it's a create-new-type / migrate-column / drop-old dance, and `ALTER TYPE ... ADD VALUE` historically couldn't run inside a transaction block (migration tools wrap everything in transactions — check the generated SQL when you add a value). Design enum value sets to *grow only*, and put anything user-editable in `text` or `settings` instead (§2.4).
 
 ---
@@ -916,14 +920,14 @@ The data layer's threat model, decided here and enforced by schema:
 
 - **RLS as designed in §3.6** — enabled on all nine tables, SELECT-only for `authenticated`, zero write policies, `memories`/`tool_invocations` with no policies at all (fail closed). Combined with doc 04's key discipline this completes the blast-radius story: leaked anon key → nothing; compromised web bundle → read-only view of what Varun sees; the write path exists only behind the API's service credentials.
 
-- **PII erasure — the hard-delete design.** Doc 00 §12 promises deletion on request; here is the mechanism. First, the tempting-but-wrong answer: `ON DELETE CASCADE` from `recruiters` to `calls`. **No** — call rows also carry non-personal *operational* telemetry (durations, per-call costs, latency evidence) that anonymizes cleanly, and a bare cascade silently vaporizes it while leaving the recording file in Storage untouched (FK cascades cannot reach object storage). Our recommendation — **full erasure via an explicit service method**, `RecruiterErasureService.erase(recruiterId)`:
-  1. For each of the recruiter's calls: hard-delete `transcript_entries`, `summaries`, `tool_invocations` (they contain the recruiter's words — PII); delete the recording object from the `recordings` bucket via the StorageProvider; null `recording_path`.
+- **PII erasure — the hard-delete design.** Doc 00 promises deletion on request; here is the mechanism. First, the tempting-but-wrong answer: `ON DELETE CASCADE` from `recruiters` to `calls`. **No** — call rows also carry non-personal *operational* telemetry (durations, per-call costs) that anonymizes cleanly, and a bare cascade silently vaporizes it while leaving the recording file in Storage untouched (FK cascades cannot reach object storage). Our recommendation — **full erasure via an explicit service method**, `RecruiterErasureService.erase(recruiterId)`:
+  1. For each of the recruiter's calls: hard-delete `transcript_entries`, `summaries`, `tool_invocations` (they contain the recruiter's words — PII); delete the recording object from the `recordings` bucket via the StorageProvider; null `storage_path` and `recording_url`. (Bolna also retains execution data vendor-side — the erasure runbook in doc 18 covers requesting deletion there.)
   2. Hard-delete the recruiter row — the schema's `onDelete` rules finish the job: `memories` and `opportunities` **Cascade** (pure recruiter PII), `calls.recruiter_id` **SetNull** (the call survives, anonymized to a duration + cost).
   3. DB steps in one transaction; Storage deletion with retry; a non-PII audit entry ("erasure executed for recruiter <uuid> at <time>") written last.
 
   Why a method over pure FK mechanics: cascades can't delete Storage objects or redact logs, an explicit method is testable and auditable, and erasure should be a *deliberate* action — not a side effect any stray `DELETE` can trigger. The FK rules in §3.2 are the safety net under it, not the mechanism itself.
 
-- **Phone numbers: E.164 in the DB, masked everywhere else.** `recruiters.phone` stores canonical E.164 (`+9198…`) — one format, so the unique constraint and caller lookup can't be defeated by formatting variants (`098…`, `98…`, spaces). Outside the database, phone numbers are PII: Pino's redaction paths mask them in application logs (doc 05's webhook handling and doc 09's logger config), and they never appear in BullMQ payloads beyond the IDs rule of doc 01 §12.
+- **Phone numbers: E.164 in the DB, masked everywhere else.** `recruiters.phone` stores canonical E.164 (`+9198…`) — one format, so the unique constraint and the identify webhook's caller lookup can't be defeated by formatting variants (`098…`, `98…`, spaces). Normalize Bolna's `contact_number` parameter to E.164 at the webhook boundary (doc 08) before it touches this table. Outside the database, phone numbers are PII: Pino's redaction paths mask them in application logs (doc 08's webhook handling and doc 09's logger config), and they never appear in BullMQ payloads beyond the IDs rule of doc 01.
 - **Backups are part of the schema's story.** Per doc 04 §11: free tier = daily backups with 7-day retention at time of writing, PITR is a paid add-on — check current limits at https://supabase.com/pricing. A bad migration is now your likeliest data-loss vector (more likely than hardware failure), which is exactly why migrations are reviewed SQL files (§11) and `migrate deploy` runs only what was committed. Before go-live (doc 15), re-decide the PITR question consciously.
 - **The `_prisma_migrations` table is trusted state.** It records what's applied; nobody edits it by hand. If it ever disagrees with reality (drift — §7), fix forward with a migration, never by rewriting the ledger.
 

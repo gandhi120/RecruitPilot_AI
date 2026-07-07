@@ -1,0 +1,1088 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RecruitPilot AI — Mission Control</title>
+<style>
+  /* ===== JARVIS HUD — single-theme dark (deliberate) ===== */
+  :root {
+    --bg: #060B14;
+    --panel: #0E1826;
+    --panel-2: #101E30;
+    --line: #1B3048;
+    --cyan: #5FD4F4;
+    --cyan-dim: #2A7FA0;
+    --gold: #E8B34B;
+    --green: #3DDC84;
+    --ink: #DCE8F5;
+    --muted: #8A9BB0;
+    --faint: #5A6C82;
+    --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    --sans: "Avenir Next", "Segoe UI", -apple-system, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.55;
+    margin: 0;
+    overflow-x: hidden;
+  }
+  #stars { position: fixed; inset: 0; z-index: -1; }
+  body::before { /* faint grid over the particle canvas */
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(1100px 500px at 50% -10%, rgba(95,212,244,.06), transparent 60%),
+      repeating-linear-gradient(0deg, rgba(95,212,244,.02) 0 1px, transparent 1px 52px),
+      repeating-linear-gradient(90deg, rgba(95,212,244,.02) 0 1px, transparent 1px 52px);
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 20px 80px; }
+
+  /* ===== sticky HUD nav ===== */
+  nav.hudbar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: 18px;
+    padding: 10px 20px; margin: 0 -20px;
+    background: rgba(6,11,20,.82);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em;
+  }
+  nav.hudbar .brand { color: var(--cyan); font-weight: 600; white-space: nowrap; }
+  nav.hudbar .links { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  nav.hudbar .links::-webkit-scrollbar { display: none; }
+  nav.hudbar a {
+    color: var(--muted); text-decoration: none; padding: 5px 10px; border-radius: 6px;
+    white-space: nowrap; transition: color .15s, background .15s;
+  }
+  nav.hudbar a:hover, nav.hudbar a:focus-visible { color: var(--cyan); background: rgba(95,212,244,.08); outline: none; }
+  nav.hudbar .clock { margin-left: auto; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+  /* type roles */
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .28em; text-transform: uppercase; color: var(--cyan); margin: 0 0 10px; min-height: 17px; }
+  .eyebrow .caret { display: inline-block; width: 8px; background: var(--cyan); animation: caret 1s steps(1) infinite; }
+  @keyframes caret { 50% { opacity: 0 } }
+  h1 {
+    font-size: clamp(26px, 4.6vw, 44px); font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; margin: 0; text-wrap: balance;
+    text-shadow: 0 0 24px rgba(95,212,244,.35);
+  }
+  h2 { font-size: 15px; font-weight: 600; letter-spacing: .22em; text-transform: uppercase; color: var(--cyan); margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 4px 0 0; max-width: 62ch; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .hint { display: inline-flex; align-items: center; gap: 8px; margin-top: 10px; font-family: var(--mono); font-size: 10.5px; letter-spacing: .2em; color: var(--gold); }
+  .hint::before { content: "◈"; }
+
+  section { margin-top: 64px; scroll-margin-top: 60px; }
+  .sect-head { display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 22px; }
+  .sect-head .idx { font-family: var(--mono); color: var(--faint); font-size: 12px; letter-spacing: .15em; }
+
+  .panel {
+    background: linear-gradient(180deg, rgba(16,30,48,.9), rgba(14,24,38,.9));
+    border: 1px solid var(--line); border-radius: 10px; padding: 22px 24px; position: relative;
+  }
+  .panel::before {
+    content: ""; position: absolute; inset: -1px auto auto -1px; width: 22px; height: 22px;
+    border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan);
+    border-top-left-radius: 10px; opacity: .7;
+  }
+
+  /* ===== HERO + 3D reactor ===== */
+  header.hero { display: flex; flex-wrap: wrap; align-items: center; gap: 40px; padding: 60px 0 8px; }
+  .hero-text { flex: 1 1 380px; min-width: 300px; }
+  .statusline {
+    display: inline-flex; align-items: center; gap: 10px; margin-top: 18px;
+    font-family: var(--mono); font-size: 12px; letter-spacing: .18em;
+    border: 1px solid var(--line); border-radius: 999px; padding: 8px 16px; background: rgba(95,212,244,.06);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
+  .stamp { margin-top: 14px; font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .12em; }
+
+  .reactor-scene { perspective: 700px; flex: 0 0 auto; }
+  .reactor { position: relative; width: 230px; height: 230px; transform-style: preserve-3d; }
+  .r3d { position: absolute; inset: 0; border-radius: 50%; pointer-events: none; }
+  .r3d.a { border: 1px dashed rgba(95,212,244,.35); transform: rotateX(65deg); }
+  .r3d.b { inset: 14px; border: 1px solid rgba(95,212,244,.18); transform: rotateX(65deg) rotateZ(45deg); }
+  .r3d.c {
+    inset: -10px; transform: rotateX(65deg);
+    background: conic-gradient(from 0deg, transparent 0 84%, rgba(95,212,244,.7) 92%, transparent 100%);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+    mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  }
+  .reactor svg { position: absolute; inset: 26px; width: calc(100% - 52px); height: calc(100% - 52px); transform: rotate(-90deg); }
+  .reactor .track { stroke: var(--line); }
+  .reactor .ticks { stroke: rgba(95,212,244,.28); }
+  .reactor .fill {
+    stroke: var(--cyan); stroke-linecap: round;
+    filter: drop-shadow(0 0 6px rgba(95,212,244,.8));
+    transition: stroke-dashoffset 1.6s cubic-bezier(.25,.9,.3,1);
+  }
+  .reactor .core { position: absolute; inset: 26px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; border-radius: 50%; }
+  .reactor .core::before {
+    content: ""; position: absolute; inset: 30%; border-radius: 50%;
+    background: radial-gradient(circle, rgba(95,212,244,.28), transparent 70%);
+    z-index: -1;
+  }
+  .reactor .pct { font-family: var(--mono); font-size: 38px; font-weight: 600; color: var(--cyan); line-height: 1; font-variant-numeric: tabular-nums; text-shadow: 0 0 18px rgba(95,212,244,.8); }
+  .reactor .cap { font-family: var(--mono); font-size: 9.5px; letter-spacing: .22em; color: var(--muted); margin-top: 8px; }
+
+  /* ===== EXPLAINER ===== */
+  .explain p { margin: 0 0 12px; max-width: 68ch; }
+  .explain p:last-of-type { margin-bottom: 0; }
+  blockquote.greeting {
+    margin: 18px 0 0; padding: 16px 20px; border-left: 3px solid var(--gold);
+    background: rgba(232,179,75,.07); border-radius: 0 8px 8px 0;
+    font-style: italic; max-width: 68ch;
+  }
+  blockquote.greeting footer { font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--gold); letter-spacing: .18em; margin-top: 10px; }
+
+  /* ===== PIPELINE ===== */
+  .pipe-scroll { overflow-x: auto; padding: 14px 2px 6px; }
+  .pipeline { display: flex; align-items: stretch; min-width: 880px; }
+  .pnode, .phase-node {
+    font: inherit; color: inherit; cursor: pointer; position: relative;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line); border-radius: 10px;
+    transition: border-color .18s ease, box-shadow .18s ease;
+    transform-style: preserve-3d; will-change: transform;
+  }
+  .pnode { flex: 1 1 0; padding: 14px 12px; text-align: center; min-width: 118px; }
+  .pnode:hover, .pnode:focus-visible, .phase-node:hover, .phase-node:focus-visible {
+    border-color: var(--cyan);
+    box-shadow: 0 0 22px rgba(95,212,244,.28), inset 0 0 18px rgba(95,212,244,.05);
+    z-index: 2;
+  }
+  .pnode:focus-visible, .phase-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+  /* glare highlight driven by JS custom props */
+  .pnode::after, .phase-node::after {
+    content: ""; position: absolute; inset: 0; border-radius: 10px; pointer-events: none;
+    background: radial-gradient(140px circle at var(--gx, 50%) var(--gy, 50%), rgba(220,240,255,.14), transparent 65%);
+    opacity: 0; transition: opacity .2s ease;
+  }
+  .pnode:hover::after, .phase-node:hover::after { opacity: 1; }
+  .pnode .tap {
+    position: absolute; top: 6px; right: 8px; font-family: var(--mono); font-size: 8.5px;
+    letter-spacing: .14em; color: var(--faint); opacity: 0; transition: opacity .18s ease;
+  }
+  .pnode:hover .tap, .pnode:focus-visible .tap { opacity: 1; color: var(--cyan); }
+  .pnode .ico { font-size: 24px; line-height: 1; }
+  .pnode .name { font-weight: 600; font-size: 14px; margin-top: 8px; letter-spacing: .04em; }
+  .pnode .vendor { font-family: var(--mono); font-size: 10px; letter-spacing: .16em; color: var(--cyan); text-transform: uppercase; margin-top: 3px; }
+  .pnode .role { font-size: 11.5px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+  /* live highlight during call simulation */
+  .pnode.live {
+    border-color: var(--gold);
+    box-shadow: 0 0 26px rgba(232,179,75,.4), inset 0 0 20px rgba(232,179,75,.08);
+  }
+  .pnode.live .vendor { color: var(--gold); }
+  .plink { flex: 0 0 42px; position: relative; align-self: center; height: 2px; background: var(--line); margin: 0 2px; }
+  .plink::after { content: "▸"; position: absolute; right: -4px; top: -9px; color: var(--cyan-dim); font-size: 13px; }
+  .plink .pulse { position: absolute; top: -2px; left: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); opacity: 0; }
+  .return-note { margin-top: 14px; font-family: var(--mono); font-size: 11px; letter-spacing: .14em; color: var(--muted); text-align: center; }
+  .return-note b { color: var(--cyan); font-weight: 600; }
+
+  /* ===== CALL SIMULATOR ===== */
+  .sim { margin-top: 22px; border: 1px solid rgba(95,212,244,.35); border-radius: 12px; background: rgba(4,7,13,.75); overflow: hidden; }
+  .sim-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .sim-head .t { font-family: var(--mono); font-size: 10.5px; letter-spacing: .24em; color: var(--cyan); }
+  .sim-status { font-family: var(--mono); font-size: 10px; letter-spacing: .18em; color: var(--faint); display: inline-flex; align-items: center; gap: 8px; }
+  .sim-status .led { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .sim.running .sim-status .led { background: var(--gold); box-shadow: 0 0 10px var(--gold); }
+  .sim.running .sim-status { color: var(--gold); }
+  .btn {
+    font: inherit; cursor: pointer; margin-left: auto;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .18em;
+    color: var(--bg); background: var(--cyan); border: none; border-radius: 999px;
+    padding: 9px 20px; font-weight: 700;
+    box-shadow: 0 0 18px rgba(95,212,244,.45);
+    transition: transform .12s ease, box-shadow .12s ease, background .12s;
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 0 26px rgba(95,212,244,.6); }
+  .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .btn[disabled] { opacity: .45; cursor: default; transform: none; }
+  .sim-body { display: grid; grid-template-columns: 1fr auto; gap: 0; min-height: 150px; }
+  .sim-feed { padding: 16px 20px; font-family: var(--mono); font-size: 12.5px; overflow-y: auto; max-height: 240px; }
+  .sim-feed .row { display: flex; gap: 12px; padding: 6px 0; animation: feedin .25s ease; }
+  @keyframes feedin { from { opacity: 0; transform: translateY(6px) } }
+  .sim-feed .who { flex: 0 0 108px; font-size: 9.5px; letter-spacing: .14em; padding-top: 3px; color: var(--cyan); text-align: right; }
+  .sim-feed .row.gold .who { color: var(--gold); }
+  .sim-feed .row.green .who { color: var(--green); }
+  .sim-feed .txt { color: var(--ink); }
+  .sim-feed .txt .cursor { display: inline-block; width: 7px; height: 13px; background: var(--cyan); vertical-align: -2px; animation: caret 1s steps(1) infinite; }
+  .sim-feed .idle { color: var(--faint); letter-spacing: .12em; font-size: 11px; padding: 20px 0; text-align: center; }
+  .sim-wave { display: flex; align-items: center; padding: 0 20px; border-left: 1px dashed var(--line); }
+  .sim-wave canvas { width: 120px; height: 64px; }
+  @media (max-width: 640px) { .sim-body { grid-template-columns: 1fr; } .sim-wave { border-left: none; border-top: 1px dashed var(--line); justify-content: center; padding: 8px; } }
+
+  .planes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-top: 18px; }
+  .plane { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; background: rgba(14,24,38,.85); }
+  .plane h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: .2em; text-transform: uppercase; font-weight: 600; }
+  .plane.rt h3 { color: var(--cyan); } .plane.async h3 { color: var(--gold); }
+  .plane p { margin: 0; font-size: 13px; color: var(--muted); }
+  .plane .tag { font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: .12em; display: block; margin-top: 8px; }
+
+  /* ===== PHASE GRAPH ===== */
+  .legend { display: flex; flex-wrap: wrap; gap: 18px; margin: 0 0 18px; font-family: var(--mono); font-size: 11px; letter-spacing: .14em; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 10px; height: 10px; border-radius: 50%; }
+  .sw.done { background: var(--green); box-shadow: 0 0 8px rgba(61,220,132,.7); }
+  .sw.active { background: var(--cyan); box-shadow: 0 0 8px rgba(95,212,244,.7); }
+  .sw.locked { background: transparent; border: 1.5px solid var(--faint); }
+
+  .graph-scroll { overflow-x: auto; padding: 14px 2px 12px; }
+  .graph { display: flex; align-items: center; min-width: 960px; }
+  .gcol { display: flex; flex-direction: column; gap: 14px; }
+  .glink { flex: 0 0 34px; height: 2px; background: var(--line); position: relative; margin: 0 2px; }
+  .glink::after { content: "▸"; position: absolute; right: -4px; top: -9px; color: var(--cyan-dim); font-size: 13px; }
+
+  .phase-node { text-align: left; width: 132px; padding: 12px 12px 10px; }
+  .phase-node .pnum { font-family: var(--mono); font-size: 10px; letter-spacing: .2em; color: var(--faint); }
+  .phase-node .pname { font-weight: 600; font-size: 12.5px; line-height: 1.3; margin-top: 4px; min-height: 33px; }
+  .phase-node .pstat { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; }
+  .phase-node .bar { height: 3px; border-radius: 2px; background: var(--line); margin-top: 8px; overflow: hidden; }
+  .phase-node .bar i { display: block; height: 100%; border-radius: 2px; }
+  .phase-node.done { border-color: rgba(61,220,132,.45); }
+  .phase-node.done .pstat { color: var(--green); }
+  .phase-node.done .bar i { background: var(--green); width: 100%; }
+  .phase-node.active { border-color: var(--cyan); box-shadow: 0 0 18px rgba(95,212,244,.22); }
+  .phase-node.active .pstat { color: var(--cyan); }
+  .phase-node.active .bar i { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+  .phase-node.locked { opacity: .68; }
+  .phase-node.locked .pstat { color: var(--faint); }
+  .phase-node.pivot::before {
+    content: "🎯 RISKIEST"; position: absolute; top: -10px; right: 8px;
+    font-family: var(--mono); font-size: 8.5px; letter-spacing: .12em;
+    background: var(--bg); border: 1px solid var(--gold); color: var(--gold);
+    border-radius: 999px; padding: 2px 7px; z-index: 1;
+  }
+
+  /* ===== HOLO OVERLAY ===== */
+  .holo-backdrop {
+    position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+    padding: 24px; background: rgba(3,6,12,.72);
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    opacity: 0; pointer-events: none; transition: opacity .25s ease;
+  }
+  .holo-backdrop.show { opacity: 1; pointer-events: auto; }
+  .holo {
+    position: relative; width: min(680px, 100%); max-height: min(82vh, 720px);
+    display: flex; flex-direction: column;
+    background: linear-gradient(180deg, rgba(16,30,48,.97), rgba(10,19,32,.97));
+    border: 1px solid rgba(95,212,244,.55); border-radius: 12px;
+    box-shadow: 0 0 60px rgba(95,212,244,.22), inset 0 0 40px rgba(95,212,244,.04);
+    transform: scale(.55) rotateX(8deg); opacity: 0;
+    transition: transform .32s cubic-bezier(.2,1.1,.3,1), opacity .25s ease;
+    overflow: hidden;
+  }
+  .holo-backdrop.show .holo { transform: none; opacity: 1; }
+  .holo::before, .holo::after, .holo .br::before, .holo .br::after {
+    content: ""; position: absolute; width: 26px; height: 26px; pointer-events: none;
+    border-color: var(--cyan); border-style: solid; border-width: 0; opacity: .9; z-index: 3;
+  }
+  .holo::before { top: -1px; left: -1px; border-top-width: 2px; border-left-width: 2px; border-top-left-radius: 12px; }
+  .holo::after  { top: -1px; right: -1px; border-top-width: 2px; border-right-width: 2px; border-top-right-radius: 12px; }
+  .holo .br::before { bottom: -1px; left: -1px; border-bottom-width: 2px; border-left-width: 2px; border-bottom-left-radius: 12px; }
+  .holo .br::after  { bottom: -1px; right: -1px; border-bottom-width: 2px; border-right-width: 2px; border-bottom-right-radius: 12px; }
+  .holo .scan {
+    position: absolute; left: 0; right: 0; top: 0; height: 2px; z-index: 2; pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(95,212,244,.85), transparent); opacity: 0;
+  }
+  .holo-backdrop.show .scan { animation: scansweep 1s ease .12s 1; }
+  @keyframes scansweep { 0% { opacity: 1; top: 0 } 100% { opacity: 0; top: 100% } }
+
+  .holo-head { display: flex; align-items: flex-start; gap: 14px; padding: 20px 24px 14px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+  .holo-head .hico { font-size: 30px; line-height: 1.1; }
+  .holo-head .heye { font-family: var(--mono); font-size: 10px; letter-spacing: .26em; color: var(--cyan); text-transform: uppercase; }
+  .holo-head h3 { margin: 3px 0 0; font-size: 19px; font-weight: 600; letter-spacing: .05em; }
+  .holo-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+  .chip { font-family: var(--mono); font-size: 10px; letter-spacing: .16em; border-radius: 999px; padding: 3px 10px; border: 1px solid; white-space: nowrap; }
+  .chip.done { color: var(--green); border-color: rgba(61,220,132,.5); background: rgba(61,220,132,.08); }
+  .chip.active { color: var(--cyan); border-color: rgba(95,212,244,.5); background: rgba(95,212,244,.08); }
+  .chip.locked { color: var(--muted); border-color: var(--line); }
+  .chip.gold { color: var(--gold); border-color: rgba(232,179,75,.5); background: rgba(232,179,75,.07); }
+  .holo-close {
+    margin-left: auto; flex: 0 0 auto; cursor: pointer;
+    width: 34px; height: 34px; border-radius: 50%;
+    background: rgba(95,212,244,.08); border: 1px solid rgba(95,212,244,.4); color: var(--cyan);
+    font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  }
+  .holo-close:hover { background: rgba(95,212,244,.18); }
+  .holo-close:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .holo-body { padding: 18px 24px 22px; overflow-y: auto; }
+  .holo-body p.lede { margin: 0 0 16px; font-size: 14px; max-width: 62ch; }
+  .spec { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .spec .cell { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: rgba(6,11,20,.5); }
+  .spec .k { font-family: var(--mono); font-size: 9px; letter-spacing: .22em; color: var(--faint); text-transform: uppercase; }
+  .spec .v { font-size: 13px; margin-top: 4px; font-weight: 500; }
+  .holo-body h4 { font-family: var(--mono); font-size: 10px; letter-spacing: .24em; color: var(--cyan); text-transform: uppercase; margin: 18px 0 8px; font-weight: 600; }
+  .holo-body ul.inside { list-style: none; margin: 0; padding: 0; }
+  .holo-body ul.inside li { padding: 7px 0 7px 22px; position: relative; font-size: 13px; color: var(--muted); border-top: 1px dashed rgba(27,48,72,.8); }
+  .holo-body ul.inside li:first-child { border-top: none; }
+  .holo-body ul.inside li::before { content: "▸"; position: absolute; left: 4px; color: var(--cyan-dim); }
+  .holo-body ul.inside li b { color: var(--ink); font-weight: 600; }
+  .mstone { display: flex; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .mstone:first-of-type { border-top: none; }
+  .mk { flex: 0 0 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-family: var(--mono); }
+  .mk.done { background: rgba(61,220,132,.14); color: var(--green); border: 1px solid rgba(61,220,132,.5); }
+  .mk.active { background: rgba(95,212,244,.12); color: var(--cyan); border: 1px solid rgba(95,212,244,.5); }
+  .mk.locked { color: var(--faint); border: 1px dashed var(--faint); }
+  .mstone .mt { font-weight: 600; font-size: 13.5px; }
+  .mstone .md { color: var(--muted); font-size: 12.5px; margin-top: 3px; max-width: 60ch; }
+  .mstone .ev { font-family: var(--mono); font-size: 11px; color: var(--green); margin-top: 5px; }
+  .mstone .ev code { background: rgba(61,220,132,.1); padding: 1px 6px; border-radius: 4px; }
+
+  /* ===== LONG-LEAD ===== */
+  .alerts { display: grid; gap: 12px; }
+  .alert {
+    display: flex; gap: 14px; align-items: flex-start;
+    border: 1px solid rgba(232,179,75,.45); border-left: 4px solid var(--gold);
+    background: rgba(232,179,75,.06); border-radius: 8px; padding: 14px 18px;
+  }
+  .alert .aico { font-size: 18px; line-height: 1.3; }
+  .alert b { color: var(--gold); letter-spacing: .04em; }
+  .alert p { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+
+  /* ===== BUILD LOG ===== */
+  .term { background: #04070D; border: 1px solid var(--line); border-radius: 10px; font-family: var(--mono); font-size: 12.5px; overflow-x: auto; }
+  .term .bar-t { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .term .bar-t i { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+  .term .bar-t span { margin-left: 8px; color: var(--faint); font-size: 10.5px; letter-spacing: .18em; }
+  .term ol { list-style: none; margin: 0; padding: 14px 18px; }
+  .term li { padding: 5px 0; white-space: nowrap; }
+  .term .hash { color: var(--gold); }
+  .term .msg { color: var(--ink); }
+  .term .ok { color: var(--green); }
+  .next-obj {
+    margin-top: 18px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    border: 1px solid rgba(95,212,244,.4); border-radius: 10px; padding: 16px 20px;
+    background: rgba(95,212,244,.05);
+  }
+  .next-obj .lbl { font-family: var(--mono); font-size: 10px; letter-spacing: .24em; color: var(--cyan); }
+  .next-obj .what { font-weight: 600; }
+  .next-obj .det { color: var(--muted); font-size: 13px; flex-basis: 100%; margin: 0; }
+
+  footer.colophon { margin-top: 60px; text-align: center; font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em; color: var(--faint); }
+
+  /* ===== cursor reticle (fine pointer only) ===== */
+  #reticle { display: none; }
+  @media (pointer: fine) {
+    #reticle {
+      display: block; position: fixed; z-index: 40; pointer-events: none;
+      width: 36px; height: 36px; margin: -18px 0 0 -18px; left: 0; top: 0;
+      border: 1px solid rgba(95,212,244,.5); border-radius: 50%;
+      opacity: 0; transition: opacity .3s ease, width .18s ease, height .18s ease, margin .18s ease, border-color .18s ease;
+    }
+    #reticle::before, #reticle::after { content: ""; position: absolute; background: rgba(95,212,244,.55); }
+    #reticle::before { left: 50%; top: -6px; width: 1px; height: 6px; box-shadow: 0 42px 0 rgba(95,212,244,.55); }
+    #reticle::after { top: 50%; left: -6px; height: 1px; width: 6px; box-shadow: 42px 0 0 rgba(95,212,244,.55); }
+    #reticle.lock { width: 52px; height: 52px; margin: -26px 0 0 -26px; border-color: var(--cyan); box-shadow: 0 0 14px rgba(95,212,244,.35); }
+  }
+
+  /* ===== motion (all gated) ===== */
+  @media (prefers-reduced-motion: no-preference) {
+    .boot { opacity: 0; transform: translateY(14px); animation: boot .7s ease forwards; }
+    .boot.d1 { animation-delay: .1s } .boot.d2 { animation-delay: .3s }
+    @keyframes boot { to { opacity: 1; transform: none; } }
+    .reveal { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }
+    .reveal.in { opacity: 1; transform: none; }
+    .dot { animation: blink 1.6s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: .35; } }
+    .plink .pulse { animation: travel 2.4s linear infinite; }
+    @keyframes travel { 0% { left: 0; opacity: 0 } 12% { opacity: 1 } 88% { opacity: 1 } 100% { left: calc(100% - 6px); opacity: 0 } }
+    .phase-node.active .pstat .sw { animation: blink 1.6s ease-in-out infinite; }
+    .r3d.a { animation: spinz 14s linear infinite; }
+    .r3d.b { animation: spinz2 20s linear infinite; }
+    .r3d.c { animation: spinz 6s linear infinite; }
+    @keyframes spinz  { from { transform: rotateX(65deg) rotateZ(0) }    to { transform: rotateX(65deg) rotateZ(360deg) } }
+    @keyframes spinz2 { from { transform: rotateX(65deg) rotateZ(45deg) } to { transform: rotateX(65deg) rotateZ(-315deg) } }
+    .reactor .core::before { animation: corepulse 2.6s ease-in-out infinite; }
+    @keyframes corepulse { 50% { opacity: .55; transform: scale(1.15); } }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .reactor .fill { transition: none; }
+    .holo, .holo-backdrop { transition: none; }
+    .holo-backdrop.show .scan { animation: none; }
+    .eyebrow .caret, .sim-feed .txt .cursor { animation: none; }
+  }
+</style>
+</head>
+<body data-palette="#5FD4F4,#E8B34B,#3DDC84">
+
+<canvas id="stars" aria-hidden="true"></canvas>
+<div id="reticle" aria-hidden="true"></div>
+
+<div class="wrap">
+
+  <nav class="hudbar" aria-label="Sections">
+    <span class="brand">◈ RECRUITPILOT AI</span>
+    <div class="links">
+      <a href="#s1">BRIEF</a><a href="#s2">PIPELINE</a><a href="#s3">PROGRESS</a><a href="#s4">ALERTS</a><a href="#s5">LOG</a>
+      <a href="journey.html" style="color:var(--gold)">🛵 RIDE THE JOURNEY</a>
+    </div>
+    <span class="clock mono" id="clock">--:--:--</span>
+  </nav>
+
+  <!-- ============ HERO ============ -->
+  <header class="hero">
+    <div class="hero-text boot d1">
+      <p class="eyebrow" id="typeline"><span class="caret">&nbsp;</span></p>
+      <h1>RecruitPilot AI<br>Mission Control</h1>
+      <p class="sub">An AI executive assistant that answers recruiter phone calls on Varun's behalf — over a real phone line, in real time. This screen shows what it is, how it works, and exactly how far the build has come.</p>
+      <div class="statusline"><span class="dot"></span><span>PHASE 0 — FOUNDATIONS · IN PROGRESS</span></div>
+      <p class="stamp">LAST SYNC · 2026-07-08 · SOURCE: docs/20_ROADMAP.md + git history</p>
+      <span class="hint">TOUCH ANY MODULE TO OPEN IT · PRESS ▶ SIMULATE A CALL</span>
+    </div>
+    <div class="reactor-scene boot d2">
+      <div class="reactor" role="img" aria-label="Overall build progress: 2 of 17 milestones complete, about 12 percent">
+        <div class="r3d a"></div><div class="r3d b"></div><div class="r3d c"></div>
+        <svg viewBox="0 0 200 200" aria-hidden="true">
+          <circle class="ticks" cx="100" cy="100" r="92" fill="none" stroke-width="2" stroke-dasharray="2 8"></circle>
+          <circle class="track" cx="100" cy="100" r="78" fill="none" stroke-width="10"></circle>
+          <circle class="fill" id="ring" cx="100" cy="100" r="78" fill="none" stroke-width="10"
+                  stroke-dasharray="490.09" stroke-dashoffset="490.09"></circle>
+          <circle cx="100" cy="100" r="58" fill="none" stroke="#1B3048" stroke-width="1"></circle>
+        </svg>
+        <div class="core">
+          <div class="pct" id="pct">0%</div>
+          <div class="cap" id="pct-cap">0/17 MILESTONES</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ WHAT IS THIS ============ -->
+  <section class="reveal" aria-labelledby="s1" id="s1">
+    <div class="sect-head"><span class="idx">01</span><h2>What is this project?</h2></div>
+    <div class="panel explain">
+      <p><strong>RecruitPilot AI</strong> is a voice assistant for a real phone number. When a recruiter calls Varun and he's unavailable, the AI answers the call, honestly introduces itself as an AI, asks permission, then interviews the recruiter — which company, what role, what tech stack, what salary range, remote or not. It can check Varun's calendar, email his resume, and save the recruiter's details, all mid-call.</p>
+      <p>After the call ends, it writes a full transcript and a structured summary, saves everything to a database, and notifies Varun immediately. If the same recruiter calls again, it remembers them. Varun watches it all on a live web dashboard.</p>
+      <p>The hard part isn't the conversation — it's <strong>speed</strong>. On a phone call, a silence longer than ~1.5 seconds feels like the line went dead, so every stage of the system must stream its output before the previous stage has finished.</p>
+      <blockquote class="greeting">
+        “Hello. You've reached Varun Gandhi's AI Assistant. Varun is currently unavailable. With your permission, I can collect information regarding this opportunity and immediately notify him.”
+        <footer>— HARD-CODED OPENING LINE · THE AI NEVER PRETENDS TO BE HUMAN</footer>
+      </blockquote>
+    </div>
+  </section>
+
+  <!-- ============ PIPELINE + SIMULATOR ============ -->
+  <section class="reveal" aria-labelledby="s2" id="s2">
+    <div class="sect-head"><span class="idx">02</span><div><h2>How a call flows through the system</h2>
+    <p class="sub">Four AI/telecom services chained into one streaming loop. <strong style="color:var(--cyan)">Touch a module to open it — or press ▶ to watch a demo call travel the pipeline.</strong></p></div></div>
+    <div class="pipe-scroll">
+      <div class="pipeline" id="pipeline" role="list"><!-- injected --></div>
+    </div>
+    <p class="return-note">◂◂ REPLY AUDIO STREAMS BACK THROUGH THE SAME PATH · TOTAL BUDGET: <b>≤ 1.5s</b> FROM CALLER'S LAST WORD TO FIRST REPLY SOUND</p>
+
+    <!-- call simulator -->
+    <div class="sim" id="sim">
+      <div class="sim-head">
+        <span class="t">▍LIVE CALL FEED — DEMO</span>
+        <span class="sim-status" id="sim-status"><span class="led"></span>STANDBY</span>
+        <button class="btn" id="sim-btn">▶&nbsp; SIMULATE A CALL</button>
+      </div>
+      <div class="sim-body">
+        <div class="sim-feed" id="sim-feed" aria-live="polite">
+          <div class="idle">PRESS ▶ TO WATCH WHAT HAPPENS WHEN A RECRUITER CALLS</div>
+        </div>
+        <div class="sim-wave"><canvas id="wave" width="240" height="128" aria-hidden="true"></canvas></div>
+      </div>
+    </div>
+
+    <div class="planes">
+      <div class="plane rt">
+        <h3>⚡ Real-time plane — during the call</h3>
+        <p>Only the streaming loop above. Nothing slow is allowed here — one database write on this path would make the voice stutter.</p>
+        <span class="tag">LATENCY-CRITICAL · MEMORY ONLY</span>
+      </div>
+      <div class="plane async">
+        <h3>📋 Async plane — after the call</h3>
+        <p>Background jobs (BullMQ + Redis) save the transcript, generate the summary, email Varun with the details, and update memory. They retry on failure — the call never waits for them.</p>
+        <span class="tag">RELIABILITY-CRITICAL · QUEUED JOBS</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PHASE GRAPH ============ -->
+  <section class="reveal" aria-labelledby="s3" id="s3">
+    <div class="sect-head"><span class="idx">03</span><div><h2>Build progress — the 8 phases</h2>
+    <p class="sub">The roadmap builds one thin working slice first, then thickens it. <strong style="color:var(--cyan)">Touch any phase to open its milestones.</strong></p></div></div>
+
+    <div class="legend" aria-hidden="true">
+      <span><i class="sw done"></i> DONE</span>
+      <span><i class="sw active"></i> IN PROGRESS</span>
+      <span><i class="sw locked"></i> NOT STARTED</span>
+    </div>
+
+    <div class="graph-scroll">
+      <div class="graph" id="graph"><!-- injected --></div>
+    </div>
+  </section>
+
+  <!-- ============ LONG-LEAD ============ -->
+  <section class="reveal" aria-labelledby="s4" id="s4">
+    <div class="sect-head"><span class="idx">04</span><div><h2>⚠ Long-lead items — the clock is already running</h2>
+    <p class="sub">Two things take calendar days no amount of coding can compress. The roadmap says: start them on day one.</p></div></div>
+    <div class="alerts">
+      <div class="alert">
+        <span class="aico">📱</span>
+        <div><b>EXOTEL ACCOUNT + KYC + PHONE NUMBER</b>
+        <p>Indian telecom KYC verification takes days. Without the number there is no Phase 2 — no real call can ever reach the system. Blocks: <strong>Phase 2</strong>.</p></div>
+      </div>
+      <div class="alert">
+        <span class="aico">☁️</span>
+        <div><b>AWS ACCOUNT + DOMAIN + DNS + TLS</b>
+        <p>Domain purchase, DNS propagation, and certificate issuance are wait-time, not work-time. Blocks: <strong>Phase 6</strong> (production deploy).</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BUILD LOG ============ -->
+  <section class="reveal" aria-labelledby="s5" id="s5">
+    <div class="sect-head"><span class="idx">05</span><h2>Build log — verified from git</h2></div>
+    <div class="term">
+      <div class="bar-t"><i></i><i></i><i></i><span>GIT · MAIN BRANCH</span></div>
+      <ol>
+        <li><span class="hash">6e9d76b</span> <span class="msg">Initial commit</span></li>
+        <li><span class="hash">ea5fe60</span> <span class="msg">docs: add complete 21-file engineering documentation suite</span></li>
+        <li><span class="hash">0cd64f0</span> <span class="msg">chore: Phase 0 M1 — monorepo scaffold + secrets safety net</span> <span class="ok">✓ M0.1</span></li>
+        <li><span class="hash">6097f70</span> <span class="msg">feat(api): Phase 0 M2 — Fastify skeleton with fail-fast config</span> <span class="ok">✓ M0.2</span></li>
+      </ol>
+    </div>
+    <div class="next-obj">
+      <span class="lbl">▸ NEXT OBJECTIVE</span>
+      <span class="what">Milestone 0.3 — Containers + CI green</span>
+      <p class="det">Docker Compose (API + Redis), multi-stage Dockerfile, GitHub Actions pipeline (lint · typecheck · test · build), and one Vitest smoke test on the health route. Completing it closes Phase 0.</p>
+    </div>
+  </section>
+
+  <footer class="colophon">RECRUITPILOT AI · BUILD DASHBOARD · GENERATED 2026-07-08 · UPDATE <span class="mono">PROJECT</span> DATA IN THIS FILE AS MILESTONES CLOSE</footer>
+</div>
+
+<!-- ============ HOLO OVERLAY ============ -->
+<div class="holo-backdrop" id="backdrop">
+  <div class="holo" role="dialog" aria-modal="true" aria-labelledby="holo-title">
+    <span class="br" aria-hidden="true"></span>
+    <span class="scan" aria-hidden="true"></span>
+    <div class="holo-head">
+      <span class="hico" id="holo-ico" aria-hidden="true"></span>
+      <div>
+        <span class="heye" id="holo-eye"></span>
+        <h3 id="holo-title"></h3>
+        <div class="holo-chips" id="holo-chips"></div>
+      </div>
+      <button class="holo-close" id="holo-close" aria-label="Close inside view">✕</button>
+    </div>
+    <div class="holo-body" id="holo-body"></div>
+  </div>
+</div>
+
+<script>
+/* ======== SINGLE SOURCE OF TRUTH — edit as progress advances ======== */
+const PROJECT = {
+  asOf: "2026-07-08",
+  phases: [
+    {
+      id: 0, name: "Foundations", status: "active",
+      goal: "An empty repo becomes a booting, tested, CI-green, containerized skeleton — the workbench everything else is built on.",
+      milestones: [
+        { t: "M0.1 — Safe, scaffolded monorepo", done: true,
+          d: "Folder tree, npm workspaces, .gitignore + .env.example before any secret ever existed.",
+          ev: "commit 0cd64f0" },
+        { t: "M0.2 — Fastify foundation that fails fast", done: true,
+          d: "API server with a config loader that refuses to boot on bad env, structured logging, /health + /ready endpoints, Swagger docs.",
+          ev: "commit 6097f70" },
+        { t: "M0.3 — Containers + CI green", done: false,
+          d: "Docker Compose (API + Redis), multi-stage Dockerfile, GitHub Actions pipeline, first Vitest smoke test." },
+      ],
+    },
+    {
+      id: 1, name: "Data & Dashboard", status: "locked",
+      goal: "A real database (Supabase + Prisma, with row-level security) and a live dashboard Varun can log into — empty, but updating in real time.",
+      milestones: [
+        { t: "M1.1 — Supabase + Prisma + schema", done: false, d: "Database tables for calls, recruiters, opportunities, memory, settings — locked down with row-level security." },
+        { t: "M1.2 — Dashboard + Auth", done: false, d: "Next.js login + a live calls list: insert a row in SQL, watch it appear without refreshing." },
+      ],
+    },
+    {
+      id: 2, name: "Walking Skeleton", status: "locked", pivot: true,
+      goal: "THE moment of truth: a real phone call reaches our server and hears the AI greeting. Proves the single riskiest integration before anything smart is built.",
+      milestones: [
+        { t: "M2.1 — Public bridge + authenticated WebSocket", done: false, d: "Exotel's audio stream reaches our local server through a secure, token-guarded tunnel." },
+        { t: "M2.2 — Real call → greeting → Call row", done: false, d: "Dial the number, hear the scripted AI greeting, watch the call appear live in the dashboard." },
+      ],
+    },
+    {
+      id: 3, name: "Full Voice Loop", status: "locked",
+      goal: "Turn the scripted greeting into a real conversation: hear the caller (Deepgram), think (Claude), speak (ElevenLabs) — interruptible and under the 1.5s budget.",
+      milestones: [
+        { t: "M3.1 — Hear the caller (speech-to-text)", done: false, d: "Live transcription of the caller's words as they speak." },
+        { t: "M3.2 — Think + speak (LLM + text-to-speech)", done: false, d: "Claude streams a reply; sentence 1 is already playing while sentence 3 is still being written." },
+        { t: "M3.3 — Interruptible + fast", done: false, d: "Caller can talk over the AI (it goes silent in ~300ms); measured response time ≤ 1.5s at the 95th percentile." },
+      ],
+    },
+    {
+      id: 4, name: "Agent Intelligence", status: "locked",
+      goal: "Make the agent actually useful: screening questions, the four tools (calendar, resume, save recruiter, notify), memory of returning callers, prompt-injection defense.",
+      milestones: [
+        { t: "M4.1 — Tools", done: false, d: "The AI checks the calendar, sends the resume, saves recruiter details, and pings Varun — mid-call." },
+        { t: "M4.2 — Screening, memory, defense", done: false, d: "Configurable questions, “welcome back” recognition, and resistance to callers trying to trick the AI." },
+      ],
+    },
+    {
+      id: 5, name: "Async Plane", status: "locked",
+      goal: "Everything around the call, done reliably in the background: transcript, AI summary, recruiter records, recording storage, and the email that tells Varun what happened.",
+      milestones: [
+        { t: "M5.1 — The job chain", done: false, d: "Queued jobs persist the transcript, generate the summary, and store the recording — safely retried, never duplicated." },
+        { t: "M5.2 — Notify + view", done: false, d: "Varun gets the email; the dashboard shows transcript, summary, and audio playback." },
+      ],
+    },
+    {
+      id: 6, name: "Production Deploy", status: "locked",
+      goal: "Leave the laptop behind: live on AWS in Mumbai with a real domain, auto-deploy on merge, monitoring, alarms, and a full security audit.",
+      milestones: [
+        { t: "M6.1 — Infrastructure", done: false, d: "EC2 + TLS + real domain; Exotel cut over from the dev tunnel to production." },
+        { t: "M6.2 — Pipeline + gates", done: false, d: "Merge-to-main deploys automatically; security audit and test/eval gates pass before go-live." },
+      ],
+    },
+    {
+      id: 7, name: "Polish & Iterate", status: "locked",
+      goal: "Change the greeting or questions from the dashboard without redeploying, watch per-call cost, load-test the ceiling, and prove any vendor can be swapped.",
+      milestones: [
+        { t: "M7 — Settings editor · cost dashboard · load test · vendor-swap drill", done: false, d: "The system becomes tunable, observable, and provably flexible." },
+      ],
+    },
+  ],
+};
+
+/* ---- pipeline modules: the "inside view" content ---- */
+const PIPE = [
+  {
+    ico: "📞", name: "Recruiter calls", vendor: "Real phone line", role: "Dials Varun's dedicated number",
+    eye: "MODULE 1 / 6 · ENTRY POINT", status: "n/a",
+    lede: "Everything starts with an ordinary phone call — no app, no link. A recruiter dials a real Indian virtual number from any phone.",
+    spec: [ ["Network", "PSTN — the public phone network"], ["Audio format", "μ-law · 8kHz (telephone grade)"], ["Built in", "Phase 2"] ],
+    inside: [
+      "<b>No app needed</b> — the caller uses a normal phone; the AI lives entirely on our side of the line.",
+      "<b>Caller ID is captured</b> — it's how a returning recruiter gets recognized on their next call.",
+      "<b>Consent first</b> — the scripted greeting asks permission before any information is collected.",
+    ],
+  },
+  {
+    ico: "📡", name: "Telephony", vendor: "Exotel", role: "Answers the call, streams the audio to our server",
+    eye: "MODULE 2 / 6 · TELEPHONY BRIDGE", status: "pending", phase: 2,
+    lede: "Exotel owns the phone number. When someone dials it, Exotel answers and opens a live audio stream (a WebSocket) to our server — like a pipe carrying the caller's voice in tiny chunks.",
+    spec: [ ["Vendor", "Exotel (Indian telephony)"], ["Connection", "WebSocket · start / media / stop frames"], ["Built in", "Phase 2 — the walking skeleton"], ["Spec", "docs/05_EXOTEL_SETUP.md"] ],
+    inside: [
+      "<b>KYC warning</b> — getting the number needs Indian regulatory verification that takes days. It's the #1 long-lead item.",
+      "<b>Swappable</b> — hidden behind a TelephonyProvider interface, so Exotel could be replaced by Twilio without touching features.",
+      "<b>Token-guarded</b> — the WebSocket rejects any connection without our secret token, before a session even starts.",
+    ],
+  },
+  {
+    ico: "⚙️", name: "Voice Gateway", vendor: "Fastify · our code", role: "The hub — routes audio between every service",
+    eye: "MODULE 3 / 6 · THE HUB (OUR CODE)", status: "active", phase: 0,
+    lede: "The only part we fully own. A Fastify (Node.js) server that holds the live call session: it receives the caller's audio, fans it out to the AI services, and streams the reply back — all in memory, nothing slow allowed.",
+    spec: [ ["Tech", "Fastify + TypeScript"], ["State", "One live session per call"], ["Status", "Skeleton built ✓ (Phase 0) · voice gateway in Phase 2"], ["Spec", "docs/09 · 17"] ],
+    inside: [
+      "<b>Already built:</b> fail-fast config (won't boot with bad env), structured logging, /health + /ready endpoints, Swagger docs.",
+      "<b>Coming next:</b> Docker + CI (M0.3), then the WebSocket voice gateway itself in Phase 2.",
+      "<b>Two-plane rule:</b> during the call it only moves audio; saving, summarizing, and emailing are queued for after.",
+    ],
+  },
+  {
+    ico: "👂", name: "Speech → Text", vendor: "Deepgram", role: "Transcribes the caller's words as they speak",
+    eye: "MODULE 4 / 6 · EARS", status: "pending", phase: 3,
+    lede: "Deepgram listens to the raw audio stream and turns it into text in real time — including the crucial judgment call of when the person has finished speaking (called endpointing).",
+    spec: [ ["Vendor", "Deepgram (streaming STT)"], ["Input", "μ-law 8kHz audio chunks"], ["Output", "Interim + final transcripts"], ["Built in", "Phase 3 · docs/06"] ],
+    inside: [
+      "<b>Interim results</b> — partial guesses stream in while the caller is mid-sentence, so the system is never waiting.",
+      "<b>Endpointing</b> — detecting the caller stopped talking is what triggers the AI to reply; get it wrong and you interrupt or lag.",
+      "<b>Swappable</b> — behind a SpeechProvider interface (Whisper or AssemblyAI could replace it).",
+    ],
+  },
+  {
+    ico: "🧠", name: "The Brain", vendor: "Claude", role: "Understands, decides, and uses tools",
+    eye: "MODULE 5 / 6 · BRAIN", status: "pending", phase: 3,
+    lede: "Claude reads the transcript plus the conversation so far and decides what to say — or what to do. It can pause mid-thought to call a tool: check the calendar, send the resume, save the recruiter, or notify Varun.",
+    spec: [ ["Vendor", "Anthropic Claude (streaming)"], ["Tools", "check_calendar · send_resume · save_recruiter · notify_varun"], ["Memory", "Recognizes returning recruiters"], ["Built in", "Phase 3–4 · docs/07 · 16"] ],
+    inside: [
+      "<b>Streams its reply</b> — the first sentence is already being spoken aloud while the rest is still being written.",
+      "<b>Never impersonates</b> — the self-declaration greeting plays before Claude says a single word; the prompt forbids pretending to be human.",
+      "<b>Defended</b> — a caller saying “ignore your instructions” hits prompt-injection defenses at the trust boundary.",
+      "<b>Spend-capped</b> — an Anthropic spend limit is set before the first paid call is ever made.",
+    ],
+  },
+  {
+    ico: "🗣️", name: "Text → Speech", vendor: "ElevenLabs", role: "Turns the reply into a natural voice",
+    eye: "MODULE 6 / 6 · VOICE", status: "pending", phase: 3,
+    lede: "ElevenLabs converts Claude's words into natural-sounding speech, streamed sentence-by-sentence straight back down the phone line to the caller's ear.",
+    spec: [ ["Vendor", "ElevenLabs (streaming TTS)"], ["Output", "μ-law 8kHz — telephone audio"], ["Barge-in", "Goes silent ≤ ~300ms if interrupted"], ["Built in", "Phase 3 · docs/08"] ],
+    inside: [
+      "<b>Sentence pipelining</b> — synthesis starts on sentence 1 while Claude is still generating sentence 3. This is how the 1.5s budget is met.",
+      "<b>Barge-in</b> — if the caller talks over the AI, playback is flushed instantly and the system goes back to listening.",
+      "<b>Also pre-renders</b> — the fixed greeting and fallback apology lines are synthesized once, stored as files, and played instantly with zero AI in the loop.",
+    ],
+  },
+];
+
+/* ---- derived totals ---- */
+const allM = PROJECT.phases.flatMap(p => p.milestones);
+const doneM = allM.filter(m => m.done).length;
+const pctVal = Math.round(doneM / allM.length * 100);
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const finePointer = matchMedia("(pointer: fine)").matches;
+
+/* ---- clock ---- */
+const clockEl = document.getElementById("clock");
+setInterval(() => { clockEl.textContent = new Date().toLocaleTimeString("en-GB"); }, 1000);
+clockEl.textContent = new Date().toLocaleTimeString("en-GB");
+
+/* ---- hero typewriter ---- */
+const TYPE_TEXT = "◈ SYSTEM ONLINE · PROJECT DASHBOARD";
+const typeEl = document.getElementById("typeline");
+if (reduced) { typeEl.textContent = TYPE_TEXT; }
+else {
+  let ti = 0;
+  const tt = setInterval(() => {
+    ti++;
+    typeEl.innerHTML = TYPE_TEXT.slice(0, ti) + '<span class="caret">&nbsp;</span>';
+    if (ti >= TYPE_TEXT.length) { clearInterval(tt); typeEl.textContent = TYPE_TEXT; }
+  }, 34);
+}
+
+/* ---- hero ring ---- */
+const CIRC = 2 * Math.PI * 78;
+const ring = document.getElementById("ring");
+document.getElementById("pct-cap").textContent = doneM + "/" + allM.length + " MILESTONES";
+requestAnimationFrame(() => { ring.style.strokeDashoffset = String(CIRC * (1 - pctVal / 100)); });
+const pctEl = document.getElementById("pct");
+if (reduced) { pctEl.textContent = pctVal + "%"; }
+else {
+  let cur = 0;
+  const step = () => {
+    cur += 1;
+    pctEl.textContent = Math.min(cur, pctVal) + "%";
+    if (cur < pctVal) setTimeout(step, 1400 / Math.max(pctVal, 1));
+  };
+  step();
+}
+
+/* ---- particle network background ---- */
+(function stars() {
+  const cv = document.getElementById("stars");
+  if (reduced) { cv.remove(); return; }
+  const cx = cv.getContext("2d");
+  let W, H, pts = [];
+  const N = Math.min(90, Math.floor(innerWidth / 14));
+  let mx = -9999, my = -9999;
+  function size() {
+    W = cv.width = innerWidth * devicePixelRatio;
+    H = cv.height = innerHeight * devicePixelRatio;
+    cv.style.width = innerWidth + "px"; cv.style.height = innerHeight + "px";
+  }
+  size(); addEventListener("resize", size);
+  for (let i = 0; i < N; i++) {
+    pts.push({ x: Math.random(), y: Math.random(), vx: (Math.random() - .5) * .0004, vy: (Math.random() - .5) * .0004 });
+  }
+  addEventListener("mousemove", e => { mx = e.clientX / innerWidth; my = e.clientY / innerHeight; }, { passive: true });
+  let hidden = false;
+  document.addEventListener("visibilitychange", () => { hidden = document.hidden; });
+  (function frame() {
+    requestAnimationFrame(frame);
+    if (hidden) return;
+    cx.clearRect(0, 0, W, H);
+    const R = 0.14; /* link radius in normalized space */
+    for (const p of pts) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > 1) p.vx *= -1;
+      if (p.y < 0 || p.y > 1) p.vy *= -1;
+      /* gentle drift toward cursor */
+      if (mx > -1) { p.x += (mx - p.x) * .00012; p.y += (my - p.y) * .00012; }
+    }
+    cx.lineWidth = devicePixelRatio * .5;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      for (let j = i + 1; j < pts.length; j++) {
+        const b = pts[j];
+        const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy);
+        if (d < R) {
+          cx.strokeStyle = "rgba(95,212,244," + (0.10 * (1 - d / R)).toFixed(3) + ")";
+          cx.beginPath(); cx.moveTo(a.x * W, a.y * H); cx.lineTo(b.x * W, b.y * H); cx.stroke();
+        }
+      }
+      cx.fillStyle = "rgba(95,212,244,.5)";
+      cx.beginPath(); cx.arc(a.x * W, a.y * H, devicePixelRatio, 0, 7); cx.fill();
+    }
+  })();
+})();
+
+/* ---- scroll reveal ---- */
+if (!reduced) {
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(en => { if (en.isIntersecting) { en.target.classList.add("in"); io.unobserve(en.target); } });
+  }, { threshold: .12 });
+  document.querySelectorAll(".reveal").forEach(el => io.observe(el));
+} else {
+  document.querySelectorAll(".reveal").forEach(el => el.classList.add("in"));
+}
+
+/* ---- render pipeline ---- */
+const pipeEl = document.getElementById("pipeline");
+pipeEl.innerHTML = PIPE.map((n, i) => `
+  <button class="pnode" role="listitem" data-pipe="${i}" aria-haspopup="dialog" aria-label="Open inside view: ${n.name} (${n.vendor})">
+    <span class="tap">◈ OPEN</span>
+    <div class="ico" aria-hidden="true">${n.ico}</div>
+    <div class="name">${n.name}</div>
+    <div class="vendor">${n.vendor}</div>
+    <div class="role">${n.role}</div>
+  </button>`
+).join(`<div class="plink" aria-hidden="true"><span class="pulse"></span></div>`);
+
+/* ---- render phase graph (phases 4 & 5 parallel, stacked) ---- */
+const graph = document.getElementById("graph");
+const STATUS_LABEL = { done: "✓ DONE", active: "● IN PROGRESS", locked: "○ NOT STARTED" };
+function nodeHTML(p) {
+  const dm = p.milestones.filter(m => m.done).length;
+  const w = Math.round(dm / p.milestones.length * 100);
+  return `<button class="phase-node ${p.status}${p.pivot ? " pivot" : ""}" data-phase="${p.id}" aria-haspopup="dialog"
+    aria-label="Open inside view: Phase ${p.id} ${p.name}, ${dm} of ${p.milestones.length} milestones done">
+    <span class="pnum">PHASE ${String(p.id).padStart(2, "0")}</span>
+    <div class="pname">${p.name}</div>
+    <span class="pstat"><i class="sw ${p.status}"></i>${STATUS_LABEL[p.status]}</span>
+    <span class="mono" style="font-size:9.5px;color:var(--faint);display:block;margin-top:6px">${dm}/${p.milestones.length} MILESTONES</span>
+    <div class="bar"><i style="width:${w}%"></i></div>
+  </button>`;
+}
+const cols = [[0], [1], [2], [3], [4, 5], [6], [7]];
+graph.innerHTML = cols.map(ids =>
+  `<div class="gcol">${ids.map(id => nodeHTML(PROJECT.phases[id])).join("")}</div>`
+).join(`<div class="glink" aria-hidden="true"></div>`);
+
+/* ================= HOLO OVERLAY ================= */
+const backdrop = document.getElementById("backdrop");
+const holo = backdrop.querySelector(".holo");
+const holoIco = document.getElementById("holo-ico");
+const holoEye = document.getElementById("holo-eye");
+const holoTitle = document.getElementById("holo-title");
+const holoChips = document.getElementById("holo-chips");
+const holoBody = document.getElementById("holo-body");
+const holoClose = document.getElementById("holo-close");
+let lastFocus = null;
+
+function chip(cls, txt) { return `<span class="chip ${cls}">${txt}</span>`; }
+
+function openHolo({ ico, eye, title, chips, body }, originEl) {
+  lastFocus = originEl || document.activeElement;
+  holoIco.textContent = ico;
+  holoEye.textContent = eye;
+  holoTitle.textContent = title;
+  holoChips.innerHTML = chips;
+  holoBody.innerHTML = body;
+  holoBody.scrollTop = 0;
+  backdrop.style.display = "flex";
+  if (originEl && !reduced) {
+    const r = originEl.getBoundingClientRect();
+    const cxp = r.left + r.width / 2, cyp = r.top + r.height / 2;
+    const h = holo.getBoundingClientRect();
+    holo.style.transformOrigin =
+      Math.max(0, Math.min(cxp - h.left, h.width)) + "px " +
+      Math.max(0, Math.min(cyp - h.top, h.height)) + "px";
+  } else {
+    holo.style.transformOrigin = "50% 50%";
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => backdrop.classList.add("show")));
+  holoClose.focus({ preventScroll: true });
+  document.body.style.overflow = "hidden";
+}
+function closeHolo() {
+  backdrop.classList.remove("show");
+  document.body.style.overflow = "";
+  const done = () => { backdrop.style.display = "none"; };
+  reduced ? done() : setTimeout(done, 280);
+  if (lastFocus) lastFocus.focus({ preventScroll: true });
+}
+backdrop.style.display = "none";
+holoClose.addEventListener("click", closeHolo);
+backdrop.addEventListener("click", e => { if (e.target === backdrop) closeHolo(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && backdrop.classList.contains("show")) closeHolo();
+});
+
+const PIPE_CHIP = {
+  active: chip("active", "● PARTIALLY BUILT"),
+  pending: chip("locked", "○ NOT BUILT YET"),
+  "n/a": chip("locked", "EXTERNAL — NOTHING TO BUILD"),
+};
+pipeEl.addEventListener("click", e => {
+  const btn = e.target.closest(".pnode");
+  if (!btn) return;
+  const n = PIPE[Number(btn.dataset.pipe)];
+  const chips =
+    chip("gold", n.vendor.toUpperCase()) +
+    PIPE_CHIP[n.status] +
+    (n.phase !== undefined ? chip("locked", "BUILT IN PHASE " + n.phase) : "");
+  const spec = `<div class="spec">${n.spec.map(([k, v]) =>
+    `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("")}</div>`;
+  const inside = `<h4>▍What happens inside</h4><ul class="inside">${n.inside.map(li => `<li>${li}</li>`).join("")}</ul>`;
+  openHolo({ ico: n.ico, eye: n.eye, title: n.name, chips, body: `<p class="lede">${n.lede}</p>${spec}${inside}` }, btn);
+});
+
+graph.addEventListener("click", e => {
+  const btn = e.target.closest(".phase-node");
+  if (!btn) return;
+  const p = PROJECT.phases[Number(btn.dataset.phase)];
+  const dm = p.milestones.filter(m => m.done).length;
+  const chips =
+    chip(p.status, STATUS_LABEL[p.status]) +
+    chip("locked", dm + "/" + p.milestones.length + " MILESTONES") +
+    (p.pivot ? chip("gold", "🎯 RISKIEST INTEGRATION") : "");
+  const rows = p.milestones.map(m => {
+    const st = m.done ? "done" : (p.status === "active" ? "active" : "locked");
+    const mark = m.done ? "✓" : (st === "active" ? "▸" : "·");
+    return `<div class="mstone">
+      <span class="mk ${st}" aria-hidden="true">${mark}</span>
+      <div>
+        <div class="mt">${m.t}${m.done ? ' <span class="mono" style="color:var(--green);font-size:10px;letter-spacing:.14em">— DONE</span>' : ""}</div>
+        <div class="md">${m.d}</div>
+        ${m.ev ? `<div class="ev">EVIDENCE · <code>${m.ev}</code></div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  openHolo({
+    ico: "◈", eye: "BUILD PHASE " + String(p.id).padStart(2, "0") + " / 07",
+    title: "Phase " + p.id + " — " + p.name, chips,
+    body: `<p class="lede">${p.goal}</p><h4>▍Milestones</h4>${rows}`,
+  }, btn);
+});
+
+/* ================= CALL SIMULATOR ================= */
+const SIM_STEPS = [
+  { node: 0, cls: "",      who: "CALLER",       text: "Dialing Varun's number from an ordinary phone…", dur: 2000 },
+  { node: 1, cls: "",      who: "EXOTEL",       text: "Call answered. Live audio stream opened to our server.", dur: 2200 },
+  { node: 2, cls: "gold",  who: "AI · SCRIPTED", text: "“Hello. You've reached Varun Gandhi's AI Assistant. With your permission, I can collect information about this opportunity.”", dur: 3400, speak: true },
+  { node: 0, cls: "",      who: "CALLER",       text: "“Sure! I'm calling about a Staff Engineer role at Acme, up to ₹80L, hybrid in Bengaluru.”", dur: 3200, speak: true },
+  { node: 3, cls: "",      who: "DEEPGRAM",     text: "Transcribing live → “staff engineer role at acme … eighty lakhs … hybrid bengaluru” ✓ caller finished speaking", dur: 2600 },
+  { node: 4, cls: "",      who: "CLAUDE",       text: "Thinking… role fits Varun's profile. Tool call → check_calendar: Varun is free Thu 4pm. Reply drafted.", dur: 2800 },
+  { node: 5, cls: "gold",  who: "ELEVENLABS",   text: "“Great — Varun is free Thursday at 4pm. Could I have your email so I can send his resume right away?”", dur: 3400, speak: true },
+  { node: -1, cls: "green", who: "AFTER CALL",   text: "Call ends → transcript saved · summary generated · resume emailed · Varun notified 📧 — all as background jobs.", dur: 3000 },
+];
+const sim = document.getElementById("sim");
+const simBtn = document.getElementById("sim-btn");
+const simFeed = document.getElementById("sim-feed");
+const simStatus = document.getElementById("sim-status");
+let simTimers = [], typing = null, speaking = false;
+
+function clearSim() {
+  simTimers.forEach(clearTimeout); simTimers = [];
+  if (typing) { clearInterval(typing); typing = null; }
+  speaking = false;
+  document.querySelectorAll(".pnode.live").forEach(n => n.classList.remove("live"));
+}
+function addRow(step, then) {
+  const row = document.createElement("div");
+  row.className = "row " + step.cls;
+  row.innerHTML = `<span class="who">${step.who}</span><span class="txt"></span>`;
+  simFeed.appendChild(row);
+  simFeed.scrollTop = simFeed.scrollHeight;
+  const txt = row.querySelector(".txt");
+  if (reduced) { txt.textContent = step.text; then(); return; }
+  let i = 0;
+  const cps = Math.max(14, Math.ceil(step.text.length / (step.dur / 1000) / 1.15));
+  typing = setInterval(() => {
+    i += 1;
+    txt.innerHTML = step.text.slice(0, i) + '<span class="cursor"></span>';
+    simFeed.scrollTop = simFeed.scrollHeight;
+    if (i >= step.text.length) { clearInterval(typing); typing = null; txt.textContent = step.text; then(); }
+  }, 1000 / cps);
+}
+function runSim() {
+  clearSim();
+  simFeed.innerHTML = "";
+  sim.classList.add("running");
+  simBtn.disabled = true;
+  simStatus.innerHTML = '<span class="led"></span>LIVE — DEMO CALL IN PROGRESS';
+  const nodes = () => document.querySelectorAll(".pnode");
+  let idx = 0;
+  const next = () => {
+    document.querySelectorAll(".pnode.live").forEach(n => n.classList.remove("live"));
+    if (idx >= SIM_STEPS.length) {
+      sim.classList.remove("running");
+      simBtn.disabled = false;
+      simBtn.innerHTML = "▶&nbsp; REPLAY THE CALL";
+      simStatus.innerHTML = '<span class="led"></span>CALL COMPLETE — PRESS ▶ TO REPLAY';
+      speaking = false;
+      return;
+    }
+    const step = SIM_STEPS[idx++];
+    speaking = !!step.speak;
+    if (step.node >= 0) {
+      const n = nodes()[step.node];
+      n.classList.add("live");
+      n.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reduced ? "auto" : "smooth" });
+    }
+    addRow(step, () => { simTimers.push(setTimeout(next, reduced ? 500 : 650)); });
+  };
+  next();
+}
+simBtn.addEventListener("click", runSim);
+
+/* waveform — animates while a 'speak' step is active */
+(function wave() {
+  const cv = document.getElementById("wave");
+  const cx = cv.getContext("2d");
+  const BARS = 14;
+  let t = 0;
+  (function frame() {
+    requestAnimationFrame(frame);
+    if (document.hidden) return;
+    t += 0.12;
+    cx.clearRect(0, 0, cv.width, cv.height);
+    const bw = cv.width / (BARS * 1.6);
+    for (let i = 0; i < BARS; i++) {
+      const amp = speaking && !reduced
+        ? (Math.sin(t + i * .9) * .5 + .5) * (Math.sin(t * .7 + i * 1.7) * .5 + .5)
+        : 0.06;
+      const h = Math.max(4, amp * cv.height * .82);
+      const x = i * bw * 1.6 + bw * .3;
+      cx.fillStyle = speaking ? "rgba(232,179,75,.9)" : "rgba(90,108,130,.55)";
+      cx.beginPath();
+      cx.roundRect(x, (cv.height - h) / 2, bw, h, bw / 2);
+      cx.fill();
+    }
+  })();
+})();
+
+/* ================= desktop ambience: reticle + tilt + glare ================= */
+if (finePointer && !reduced) {
+  const ret = document.getElementById("reticle");
+  let mx = innerWidth / 2, my = innerHeight / 2, rx = mx, ry = my, shown = false;
+  addEventListener("mousemove", e => {
+    mx = e.clientX; my = e.clientY;
+    if (!shown) { shown = true; ret.style.opacity = ".8"; }
+    ret.classList.toggle("lock", !!e.target.closest(".pnode, .phase-node, .holo-close, .btn, nav a"));
+  }, { passive: true });
+  (function follow() {
+    rx += (mx - rx) * .22; ry += (my - ry) * .22;
+    ret.style.transform = `translate(${rx}px, ${ry}px)`;
+    requestAnimationFrame(follow);
+  })();
+
+  document.querySelectorAll(".pnode, .phase-node").forEach(el => {
+    el.addEventListener("mousemove", e => {
+      const r = el.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width - .5;
+      const py = (e.clientY - r.top) / r.height - .5;
+      el.style.transform = `perspective(600px) rotateY(${px * 10}deg) rotateX(${-py * 10}deg) translateY(-2px)`;
+      el.style.setProperty("--gx", ((px + .5) * 100).toFixed(1) + "%");
+      el.style.setProperty("--gy", ((py + .5) * 100).toFixed(1) + "%");
+    });
+    el.addEventListener("mouseleave", () => { el.style.transform = ""; });
+  });
+}
+</script>
+</body>
+</html>

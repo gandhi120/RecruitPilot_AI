@@ -7,7 +7,7 @@
 
 ## 1. Goal
 
-Turn "it builds on my laptop" into "it builds, is verified, ships as a signed image, and deploys to Mumbai — automatically, on every merge, with zero dropped calls." Concretely, by the end of this document you will have two workflows in `.github/workflows/`:
+Turn "it builds on my laptop" into "it builds, is verified, ships as a signed image, and deploys to Mumbai — automatically, on every merge, with zero downtime on the webhook surface." Concretely, by the end of this document you will have two workflows in `.github/workflows/`:
 
 - **`ci.yml` — the gate.** Runs on every pull request. Installs with `npm ci` (doc 02 "lockfile is law"), then lints, typechecks, validates import direction with dependency-cruiser (doc 03), runs Vitest, builds every workspace, runs `npm audit`, and smoke-builds the Docker images. If any step fails, the PR **cannot be merged** — branch protection enforces it. This is what stops broken code from ever reaching `main`.
 - **`deploy.yml` — the shipper.** Runs on every push to `main` (i.e. every merged PR). Builds the `api` and `web` images (doc 13), tags them with the **git SHA** and `latest`, pushes them to **GHCR** (GitHub Container Registry), then SSHes into the EC2 box, runs `prisma migrate deploy` *before* swapping containers, and rolls `docker-compose.prod.yml` forward. It also runs on-demand (`workflow_dispatch`) with a **rollback SHA** input.
@@ -29,7 +29,7 @@ Two failure modes motivate the whole practice:
 - **Integration rot.** Five developers (or five branches of one developer) each work for a week in isolation. Every branch works alone; none work together. The longer code lives unmerged, the more expensive the eventual merge — a superlinear cost. CI attacks this by making integration *continuous and small*: merge daily, catch conflicts and contract-breaks while they're one-line fixes, not thousand-line archaeology.
 - **Deploy fear.** When deploying is a manual, error-prone ritual, teams deploy *rarely*, which makes each deploy *huge*, which makes it *riskier*, which makes teams deploy even more rarely — a doom loop. The cure is counter-intuitive: deploy **more** often, in **smaller** increments, through an **automated, identical, boring** pipeline. A deploy you've run 200 times and can roll back in 90 seconds is not scary. Fear-free deploys are an *engineering property you build*, not a personality trait.
 
-For a real-time voice system this matters twice over: a bad deploy doesn't show a 500 page, it **drops a live phone call mid-sentence**. The graceful-shutdown machinery from docs 09/13 (SIGTERM → drain active calls) only pays off if the deploy process actually *sends* SIGTERM and *waits* — which is exactly what a scripted, repeatable deploy guarantees and a panicked `docker restart` does not.
+For a voice-agent system this matters twice over: a bad deploy doesn't just show a 500 page — if Bolna's identify or tool webhook (doc 08) hits a half-swapped container mid-call, the agent **fumbles a live conversation** (no memory injected, a tool that "fails" on air). The graceful-shutdown machinery from docs 09/13 (SIGTERM → finish in-flight webhook responses and jobs) only pays off if the deploy process actually *sends* SIGTERM and *waits* — which is exactly what a scripted, repeatable deploy guarantees and a panicked `docker restart` does not.
 
 ### 2.2 GitHub Actions vocabulary (workflows → jobs → steps → runners)
 
@@ -94,7 +94,7 @@ Every workflow run is handed an automatically-generated, short-lived credential:
 - **It is least-privilege by policy.** We set the repo/organization default to **read-only**, then grant *just* what each workflow needs, in that workflow, via a `permissions:` block. CI needs only `contents: read`. The deploy workflow additionally needs `packages: write` to push to GHCR — nothing more.
 - **Fork PRs get a neutered token and no secrets.** A `pull_request` from someone's fork runs with a read-only `GITHUB_TOKEN` and **cannot read your secrets**. This is what makes it safe to run CI on contributions from strangers. (The dangerous opposite, `pull_request_target`, is a foot-gun covered in §10.)
 
-Because CI has no secrets and a read-only token, an attacker who opens a malicious PR *cannot* exfiltrate your Deepgram key or push a poisoned image — the blast radius is "they wasted some free CI minutes."
+Because CI has no secrets and a read-only token, an attacker who opens a malicious PR *cannot* exfiltrate your Bolna or Anthropic key or push a poisoned image — the blast radius is "they wasted some free CI minutes."
 
 ### 2.8 Environments and protection rules
 
@@ -146,7 +146,7 @@ flowchart TB
         B3 --> D1["ssh → EC2 Mumbai"]
         D1 --> D2["docker compose pull<br/>(new SHA images)"]
         D2 --> D3["npx prisma migrate deploy<br/>BEFORE swap (expand-contract)"]
-        D3 --> D4["docker compose up -d<br/>graceful SIGTERM → drain calls"]
+        D3 --> D4["docker compose up -d<br/>graceful SIGTERM → drain in-flight<br/>webhooks + jobs"]
         D4 --> D5["health check /health"]
     end
 
@@ -248,7 +248,7 @@ jobs:
         run: npx depcruise apps/api/src --validate
 
       # Vitest across every workspace. Providers are MOCKED (doc 19) — which is why
-      # CI needs no Deepgram/Claude/ElevenLabs keys (§8, and a security property §2.7).
+      # CI needs no Bolna/Claude/Google keys (§8, and a security property §2.7).
       - name: Test
         run: npm test
 
@@ -287,7 +287,7 @@ jobs:
 - `node-version-file: .nvmrc` — reads the *same* file the Dockerfiles pin against (doc 13 uses `node:22-slim`). One version number, one place, zero dev/CI/prod drift (doc 02 §11). Bump `.nvmrc` and the base image tag together and everything follows.
 - `cache: npm` needs no path config — `setup-node` knows npm's cache location and keys on the lockfile automatically.
 - The **`npx depcruise apps/api/src --validate`** step is the CI half of doc 03's promise: the Provider-Pattern import rule is "mechanical, not aspirational." A feature that sneaks in `import Anthropic` fails here, before review.
-- `npm test` needs **no vendor secrets** because tests mock every provider (doc 19). That's not a shortcut — it's the design (§8, §12): CI that can't reach the internet can't leak keys or flake on a vendor outage.
+- `npm test` needs **no vendor secrets** because tests fake every provider and replay recorded Bolna webhook payloads as fixtures (doc 19). That's not a shortcut — it's the design (§8, §12): CI that can't reach the internet can't leak keys or flake on a vendor outage.
 - The Docker smoke build passes deliberately-fake `--build-arg` values. `NEXT_PUBLIC_*` are baked at build time (doc 13 §2.10), so `next build` needs *something* present or it errors — but since we `push: false`, this throwaway image is discarded. We're testing "does the Dockerfile build," not producing a deployable.
 - `docker compose -f docker-compose.prod.yml config` is the exact doc 13 §5.7 validation, now automated: a malformed prod compose file fails a PR instead of a 2 a.m. deploy.
 
@@ -441,8 +441,9 @@ jobs:
             #    --rm: throwaway. Old containers keep serving calls during this step.
             docker compose -f docker-compose.prod.yml run --rm api npx prisma migrate deploy
 
-            # 3) SWAP: recreate only changed services. Graceful SIGTERM → drain active
-            #    calls (doc 09/13 stop_grace_period 5m) → start new containers.
+            # 3) SWAP: recreate only changed services. Graceful SIGTERM → finish
+            #    in-flight webhook responses + jobs (doc 09/13 stop_grace_period)
+            #    → start new containers.
             docker compose -f docker-compose.prod.yml up -d
 
             # 4) HEALTH CHECK: confirm the new api answers /health (doc 09) before we
@@ -469,7 +470,7 @@ jobs:
 
 #### Why `prisma migrate deploy` runs BEFORE the container swap (expand-contract)
 
-During a deploy there is a brief window where **old code and new code coexist** — old containers are draining a call while new ones start. If the new code needs a new column that doesn't exist yet, or the migration drops a column the still-running old code reads, that window throws errors on a *live call*. The discipline that makes this safe is **expand-contract** (a.k.a. parallel-change):
+During a deploy there is a brief window where **old code and new code coexist** — old containers are finishing in-flight requests while new ones start. If the new code needs a new column that doesn't exist yet, or the migration drops a column the still-running old code reads, that window throws errors on a *live call*. The discipline that makes this safe is **expand-contract** (a.k.a. parallel-change):
 
 1. **Expand** — a migration only *adds* (new nullable column, new table, new index). It is **backward-compatible**: old code ignores what it doesn't know about, new code uses it. Run this migration **before** swapping containers, so the schema is ready when new code arrives and harmless while old code drains.
 2. **Contract** — *removing* the old column/table happens in a **later, separate deploy**, only after no running code references it anymore.
@@ -653,14 +654,14 @@ Why store the `NEXT_PUBLIC_*` values as Secrets even though they're "public"? Be
 
 ### 8.2 Server-side runtime `.env` (NOT here — owned by doc 15)
 
-The application's real secrets — `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `EXOTEL_*`, `DATABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `REDIS_URL`, SMTP creds — live **only** in `/opt/recruitpilot/.env` on the EC2 box (doc 13 §4.5 `env_file: .env`; provisioned in doc 15). They are injected into containers **at runtime**, never baked into images, and **never** enter GitHub.
+The application's real secrets — `ANTHROPIC_API_KEY`, `BOLNA_API_KEY`, `BOLNA_AGENT_ID`, `BOLNA_WEBHOOK_TOKEN`, `DATABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `REDIS_URL`, SMTP creds — live **only** in `/opt/recruitpilot/.env` on the EC2 box (doc 13 §4.5 `env_file: .env`; provisioned in doc 15). They are injected into containers **at runtime**, never baked into images, and **never** enter GitHub.
 
 ### 8.3 The deliberate security property: CI needs no vendor keys
 
-CI runs `npm test` with **every provider mocked** (doc 19) — Deepgram, Claude, ElevenLabs, Exotel are all fakes in tests. Therefore **CI requires zero vendor API keys.** This is not an oversight to fix later; it is a designed property:
+CI runs `npm test` with **every provider mocked** (doc 19) — Bolna's webhooks are replayed from recorded JSON fixtures, and Claude, Google Calendar, and email are all fakes in tests. Therefore **CI requires zero vendor API keys.** This is not an oversight to fix later; it is a designed property:
 
 - **Nothing to leak.** A malicious PR or a compromised third-party action running in CI has no vendor secret to exfiltrate — there isn't one present (§2.7).
-- **No flakiness.** Tests can't fail because Deepgram had a bad minute — they don't call Deepgram.
+- **No flakiness.** Tests can't fail because Bolna or Anthropic had a bad minute — they don't call either.
 - **Fast + free.** No metered vendor calls in CI, ever.
 
 The only place real vendor keys exist is the server's `.env` (doc 15). Draw a hard line: **CI = mocked, key-free, internet-optional; server = the one place real keys live.**
@@ -676,7 +677,7 @@ Do these in order; each proves one link of the chain works.
 3. **Merge triggers deploy.** Merge the green PR. `deploy.yml` should start on the `push` to `main`. (End-to-end success — SSH, migrate, health — is **forward-verified after doc 15**, when `EC2_*` hold real values. Until then, expect the `build` job to succeed and push images, and the `deploy` job to fail at the SSH step against the placeholder host — that's the expected pre-doc-15 state.)
 4. **GHCR shows the images.** Repo → **Packages** (or your profile → Packages): `recruitpilot-api` and `recruitpilot-web` each with a `latest` tag and a git-SHA tag matching the merge commit.
 5. **Dependabot's first PRs appear.** Within a day (or trigger via Insights → Dependency graph → Dependabot → "Check for updates"), Dependabot opens PRs for outdated deps/actions — each running through the same CI gate.
-6. **(Post doc 15) A real deploy goes fully green** — build → push → SSH → migrate → up -d → `/health` 200, with no dropped calls.
+6. **(Post doc 15) A real deploy goes fully green** — build → push → SSH → migrate → up -d → `/health` 200, with the webhook surface answering throughout.
 
 **Self-quiz** (answer from memory before moving on):
 
@@ -712,7 +713,7 @@ Do these in order; each proves one link of the chain works.
   1. Find the last known-good commit SHA (Actions history, or the SHA tag on the previous GHCR image).
   2. Run: `gh workflow run deploy.yml -f sha=<previous-good-sha>`.
   3. The `build` job **skips** (image already in GHCR); `deploy` pulls that SHA, runs any pending (expand-only) migrations, and swaps containers gracefully.
-  4. Confirm `/health` and place a test call. Then investigate the bad commit at leisure — prod is already safe.
+  4. Confirm `/health` and place a test call through Bolna (doc 05). Then investigate the bad commit at leisure — prod is already safe.
 
 - **Timeouts on every job** (`timeout-minutes`) so a hung step self-destructs instead of burning the runner budget.
 - **One version manifest.** `.nvmrc` feeds both `setup-node` and the Dockerfiles (doc 02 §11) — CI, local, and prod Node versions cannot drift.
@@ -753,6 +754,4 @@ Do these in order; each proves one link of the chain works.
 
 ## 14. Next Step
 
-Proceed to **`15_DEPLOYMENT.md`** — provisioning the AWS EC2 box in Mumbai that this pipeline deploys to: launching the instance and security group, creating the deploy-only user and the SSH keypair whose private half becomes `EC2_SSH_PRIVATE_KEY`, laying down `/opt/recruitpilot/.env` with the real vendor keys, pointing DNS + issuing TLS certificates (the certbot loop from doc 13), and finally watching a merge to `main` sail all the way from a green PR to a live, health-checked deploy in Mumbai — with a real phone call surviving a deploy mid-conversation.
-</content>
-</invoke>
+Proceed to **`15_DEPLOYMENT.md`** — provisioning the AWS EC2 box in Mumbai that this pipeline deploys to: launching the instance and security group, creating the deploy-only user and the SSH keypair whose private half becomes `EC2_SSH_PRIVATE_KEY`, laying down `/opt/recruitpilot/.env` with the real vendor keys, pointing DNS + issuing TLS certificates (the certbot loop from doc 13), repointing Bolna's webhooks from ngrok to the production domain, and finally watching a merge to `main` sail all the way from a green PR to a live, health-checked deploy in Mumbai.

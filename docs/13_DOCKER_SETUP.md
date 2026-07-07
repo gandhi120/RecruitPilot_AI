@@ -12,7 +12,7 @@ Containerize the entire system so that "it works on my machine" becomes "it work
 - **One API image, two processes**: `docker/api.Dockerfile` builds a single image that runs as *either* the Fastify server (`node dist/server.js`) or the BullMQ worker (`node dist/worker.js`) — the compose `command:` decides (doc 01 §3.2, doc 03 §11).
 - **A web image** using Next.js **standalone output** — a self-contained ~50MB runtime instead of shipping the full `node_modules`.
 - **Two compose files**: `docker-compose.yml` for local dev (pragmatic default: dockerize *only Redis*, run api/web natively) and `docker-compose.prod.yml` for the EC2 box (Nginx as the single public surface, everything else on a private network).
-- **Graceful shutdown that survives containerization** — the SIGTERM → drain-active-calls flow from doc 09 must reach the Node process, which Docker breaks by default unless you know the PID 1 rules.
+- **Graceful shutdown that survives containerization** — the SIGTERM → finish-in-flight-webhooks-and-jobs flow from doc 09 must reach the Node process, which Docker breaks by default unless you know the PID 1 rules. (The live audio itself runs on Bolna's platform, not in our containers — but a webhook response or queue job killed mid-write is still data lost.)
 
 By the end you can build, run, inspect, and kill every container locally, and explain *why* every line of every Dockerfile exists.
 
@@ -81,16 +81,16 @@ The **build context** is everything Docker uploads to the builder before the fir
 | Native modules | occasionally break or need `apk` build tools — musl is the less-tested path | just work — glibc is what every prebuilt binary targets |
 | Prisma engines | supported but needs care | first-class |
 
-**Our choice**: `node:22-slim` for the **api** image — it loads Prisma's native query engine and may later need audio-processing native deps (μ-law transcode, doc 17); 20MB is cheap insurance against a 2 a.m. musl segfault. `node:22-alpine` is fine for the **web** image — Next.js standalone output is pure JS with no native runtime deps. Never `node:latest` or bare `node:22` (the full 1GB image, and unpinned tags break reproducibility — §12).
+**Our choice**: `node:22-slim` for the **api** image — it loads Prisma's native query engine, and 20MB is cheap insurance against a 2 a.m. musl segfault. `node:22-alpine` is fine for the **web** image — Next.js standalone output is pure JS with no native runtime deps. Never `node:latest` or bare `node:22` (the full 1GB image, and unpinned tags break reproducibility — §12).
 
 ### 2.6 The PID 1 problem + signal handling
 
 Inside a container, your `CMD` runs as **PID 1**. Two traps:
 
-1. **Shell-form CMD eats signals.** `CMD node dist/server.js` (shell form) actually runs `/bin/sh -c "node ..."` — *sh* is PID 1, and `sh` does **not** forward SIGTERM to its child. `docker stop` sends SIGTERM, nothing happens, Docker waits out the grace period, then SIGKILLs. Your graceful shutdown from doc 09 (stop accepting calls → drain active calls → drain queues) **never runs** — live calls are dropped mid-sentence. Fix: **exec form** — `CMD ["node", "dist/server.js"]` — so Node itself is (effectively) PID 1 and receives SIGTERM directly.
+1. **Shell-form CMD eats signals.** `CMD node dist/server.js` (shell form) actually runs `/bin/sh -c "node ..."` — *sh* is PID 1, and `sh` does **not** forward SIGTERM to its child. `docker stop` sends SIGTERM, nothing happens, Docker waits out the grace period, then SIGKILLs. Your graceful shutdown from doc 09 (stop accepting requests → finish in-flight webhook responses → close queue connections) **never runs** — a Bolna tool call mid-deploy gets a dropped connection, and a half-processed job dies uncommitted. Fix: **exec form** — `CMD ["node", "dist/server.js"]` — so Node itself is (effectively) PID 1 and receives SIGTERM directly.
 2. **PID 1 doesn't reap zombies.** Normally `init` adopts and reaps orphaned child processes; Node as PID 1 doesn't. Fix: `init: true` in compose, which injects `tini` — a 10KB init that forwards signals and reaps zombies. We use both exec-form CMD *and* `init: true` (belt and suspenders).
 
-Also set `stop_grace_period` generously for the api service: doc 01 §11 allows active calls up to 5 minutes to finish — Docker's default 10-second SIGKILL would defeat that.
+Also set `stop_grace_period` sensibly: webhook responses finish in under a second (doc 08 budgets), so 30s covers the api comfortably; the worker gets 60s to finish in-flight jobs (a summary generation can take a while). Docker's default 10 seconds would cut the worker short.
 
 ### 2.7 Healthchecks
 
@@ -109,7 +109,7 @@ A container's writable layer dies with the container. Redis holds our **BullMQ q
 
 Compose creates user-defined bridge networks with **service-name DNS**: the api reaches Redis at hostname `redis` because that's the service name — no IPs, ever. We define two networks in prod:
 
-- **`edge`** — a normal bridge. Nginx, api, worker, web, certbot live here. Only **Nginx publishes ports** (80/443). Containers on `edge` have outbound internet (api/worker need Deepgram, Claude, ElevenLabs, Supabase, SMTP).
+- **`edge`** — a normal bridge. Nginx, api, worker, web, certbot live here. Only **Nginx publishes ports** (80/443). Containers on `edge` have outbound internet (api/worker need Claude, Supabase, Google Calendar, SMTP, and Bolna's API for recording downloads).
 - **`internal`** — declared `internal: true`: **no route to the host's ports and no internet at all**. Only Redis, api, and worker attach. Redis is therefore reachable *exclusively* by api/worker over container DNS — it has no published port and *couldn't* be exposed even by accident. This implements doc 01 §12 literally: "Redis has no public port — the #1 cause of hijacked servers is an exposed Redis."
 
 ### 2.10 Build-time ARG vs runtime env — the Next.js nuance
@@ -144,11 +144,11 @@ flowchart TB
         WK["worker — SAME image<br/>command: node dist/worker.js<br/>networks: edge + internal"]
         WEB["web — standalone<br/>network: edge"]
         RD[("redis + AOF volume<br/>network: internal ONLY<br/>internal: true — no internet,<br/>no published port")]
-        INET(("Internet"))
-        VENDORS(("Deepgram · Claude ·<br/>ElevenLabs · Supabase"))
+        INET(("Internet — incl. Bolna's<br/>webhook calls"))
+        VENDORS(("Bolna API · Claude ·<br/>Supabase · Google · SMTP"))
 
         INET -->|"80/443 only"| NG
-        NG -->|"proxy /api + WS /voice/stream"| API
+        NG -->|"proxy /webhooks + /api"| API
         NG -->|"proxy /"| WEB
         CB -.->|"shared cert volumes"| NG
         API ---|"redis DNS"| RD
@@ -181,7 +181,7 @@ RecruitPilot_AI/
 │   ├── api.Dockerfile          # multi-stage: deps → build → prod-deps → runtime
 │   ├── web.Dockerfile          # Next.js standalone, NEXT_PUBLIC_* build ARGs
 │   └── nginx/
-│       └── nginx.conf          # reverse proxy + WS upgrade (TLS finalized in doc 15)
+│       └── nginx.conf          # reverse proxy for webhooks/API/dashboard (TLS finalized in doc 15)
 ├── docker-compose.yml          # dev: redis (default) + api/worker/web (profile: full)
 ├── docker-compose.prod.yml     # EC2: nginx + certbot + api + worker + web + redis
 └── .dockerignore
@@ -221,8 +221,8 @@ README.md
 # syntax=docker/dockerfile:1
 # One image, two entrypoints (doc 01 §3.2): the default CMD runs the API
 # server; the worker service overrides it with `command:` in compose.
-# Base: node:22-slim (Debian) — glibc for Prisma engines & any future
-# native audio deps (§2.5). Version-pinned, never :latest.
+# Base: node:22-slim (Debian) — glibc for Prisma engines (§2.5).
+# Version-pinned, never :latest.
 
 # ---------- Stage 1: deps — cached until a manifest changes (§2.2) ----------
 FROM node:22-slim AS deps
@@ -289,7 +289,8 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
   CMD curl -fsS http://localhost:3000/health || exit 1
 
 # EXEC FORM — mandatory. Shell form would make /bin/sh PID 1 and swallow
-# SIGTERM, breaking graceful shutdown (§2.6) and dropping live calls.
+# SIGTERM, breaking graceful shutdown (§2.6) and killing in-flight
+# webhook responses and queue work.
 CMD ["node", "dist/server.js"]
 ```
 
@@ -469,7 +470,7 @@ services:
     environment:
       HOST: 0.0.0.0
       REDIS_URL: redis://redis:6379
-    stop_grace_period: 5m         # doc 01 §11: let active calls finish before SIGKILL
+    stop_grace_period: 30s        # §2.6: finish in-flight webhook responses, then exit
     mem_limit: 1g                 # sized for the EC2 instance; tuned in doc 15
     depends_on:
       redis:
@@ -532,7 +533,7 @@ volumes:
 
 ### 4.6 `docker/nginx/nginx.conf` (essentials — TLS finalized in doc 15)
 
-The one block you must never get wrong is the **WebSocket upgrade** for `/voice/stream`: without `Upgrade`/`Connection` headers, Nginx silently downgrades Exotel's WSS handshake to plain HTTP and every call fails at connect. Shown here with the port-80 server block; doc 15 adds `listen 443 ssl`, certificates, and the real `server_name` + HTTP→HTTPS redirect.
+The public surface is **plain HTTPS** now: Bolna's webhook calls (identify, tools, post-call — doc 08), the dashboard's REST calls, and the dashboard itself. No WebSocket voice path, no long-lived connections, no special upgrade headers — the config is deliberately boring. Shown here with the port-80 server block; doc 15 adds `listen 443 ssl`, certificates, and the real `server_name` + HTTP→HTTPS redirect.
 
 ```nginx
 worker_processes auto;
@@ -546,18 +547,10 @@ http {
     default_type  application/octet-stream;
 
     sendfile on;
-    client_max_body_size 10m;      # resume uploads via dashboard; audio never comes via HTTP body
+    client_max_body_size 10m;      # resume uploads via dashboard; Bolna webhook bodies are far smaller
 
     gzip on;
     gzip_types text/plain text/css application/json application/javascript;
-    # (never gzip the WS path — it's a byte stream, not documents)
-
-    # WebSocket-aware Connection header: "upgrade" during handshakes,
-    # "close" otherwise. The standard idiom for proxied WebSockets.
-    map $http_upgrade $connection_upgrade {
-        default upgrade;
-        ''      close;
-    }
 
     # Service-name DNS from the compose `edge` network (§2.9)
     upstream api_upstream { server api:3000; }
@@ -572,20 +565,19 @@ http {
             root /var/www/certbot;
         }
 
-        # ---- CRITICAL: the voice WebSocket (doc 01 §3.2) ----
-        location /voice/stream {
+        # ---- The Bolna webhook surface (docs 08/12): identify, tools, post-call ----
+        # Token auth happens in Fastify (Bearer BOLNA_WEBHOOK_TOKEN); nginx just
+        # proxies. Keep timeouts DEFAULT — identify must answer in <500ms anyway
+        # (doc 08); a webhook that needs a long timeout is a bug, not a config task.
+        location /webhooks/ {
             proxy_pass http://api_upstream;
-            proxy_http_version 1.1;                        # WS requires HTTP/1.1
-            proxy_set_header Upgrade $http_upgrade;        # forward the upgrade...
-            proxy_set_header Connection $connection_upgrade;  # ...or calls die at handshake
+            proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_read_timeout 3600s;    # default 60s would cut every call at the 1-minute mark
-            proxy_send_timeout 3600s;
-            proxy_buffering off;         # stream frames immediately — buffering adds latency
+            proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # REST API + Exotel webhooks
+        # Dashboard REST API
         location /api/ {
             proxy_pass http://api_upstream;
             proxy_http_version 1.1;
@@ -638,7 +630,7 @@ Docker Desktop is already installed and running (doc 00 §5). Now:
 | Node.js Docker best practices | https://github.com/nodejs/docker-node/blob/main/docs/BestPractices.md |
 | Next.js standalone output | https://nextjs.org/docs/app/api-reference/config/next-config-js/output |
 | Prisma in Docker | https://www.prisma.io/docs/orm/prisma-client/deployment/deploy-to-docker |
-| Nginx WebSocket proxying | https://nginx.org/en/docs/http/websocket.html |
+| Nginx reverse-proxy docs | https://nginx.org/en/docs/http/ngx_http_proxy_module.html |
 | Docker Scout | https://docs.docker.com/scout/ |
 
 ---
@@ -700,7 +692,7 @@ docker compose down
 
 **Injection mechanics recap:**
 
-- `env_file: .env` — the root `.env` (doc 03 §8) is loaded into the container **at start**. Right for every secret (`ANTHROPIC_API_KEY`, `DATABASE_URL`, `EXOTEL_*`, ...). The image contains none of them.
+- `env_file: .env` — the root `.env` (doc 03 §8) is loaded into the container **at start**. Right for every secret (`ANTHROPIC_API_KEY`, `DATABASE_URL`, `BOLNA_API_KEY`, `BOLNA_WEBHOOK_TOKEN`, ...). The image contains none of them.
 - `environment:` — inline non-secret overrides (`HOST`, `REDIS_URL`) that are *facts about the container topology*, so they live in the compose file, visibly.
 - `build.args` — **build-time only**, for the web image's `NEXT_PUBLIC_*` values (§2.10):
 
@@ -729,7 +721,7 @@ Run each check; all must pass before doc 14:
 **Self-quiz** (from memory):
 
 1. Why multi-stage builds — name three concrete things the runtime stage does *not* contain, and why that matters.
-2. Why exec-form `CMD` — trace exactly what happens to a live phone call when `docker stop` hits a shell-form api container.
+2. Why exec-form `CMD` — trace exactly what happens to an in-flight Bolna tool webhook and a half-processed queue job when `docker stop` hits a shell-form container.
 3. Why does Redis have no published port in prod, and which two compose mechanisms make exposure impossible rather than merely avoided?
 4. `NEXT_PUBLIC_API_URL` changed — why does restarting the web container do nothing, and what is the correct fix?
 5. Why copy only `package*.json` files before `npm ci`, and which files must be copied in a workspaces monorepo?
@@ -743,7 +735,7 @@ Run each check; all must pass before doc 14:
 3. **Alpine native-module surprises.** A dependency with a prebuilt glibc binary segfaults or falls back to compiling on musl — often discovered only in prod. That's why the api uses `node:22-slim`; if you ever switch, re-run the full verification (§2.5).
 4. **Forgetting `HOST=0.0.0.0`.** The container runs, the healthcheck passes (it curls localhost *inside*), but `curl localhost:3000` from your machine resets — Fastify bound `127.0.0.1` inside the container's namespace. Classic, maddening, one env var (doc 09).
 5. **Publishing Redis's port in prod.** `- "6379:6379"` on an internet-facing EC2 box = your Redis is scanned within minutes and used for crypto-mining or data theft — the exact hijack doc 01 §12 warns about. In prod Redis gets *no* `ports:` and sits on `internal: true`.
-6. **Shell-form `CMD` eating SIGTERM.** `CMD node dist/server.js` (no brackets) breaks graceful shutdown silently: deploys SIGKILL the process, active calls drop mid-sentence, queue jobs die uncommitted. Always `CMD ["node", ...]` + `init: true` (§2.6).
+6. **Shell-form `CMD` eating SIGTERM.** `CMD node dist/server.js` (no brackets) breaks graceful shutdown silently: deploys SIGKILL the process, in-flight webhook responses drop, queue jobs die uncommitted. Always `CMD ["node", ...]` + `init: true` (§2.6).
 7. **Baking secrets into images via `ARG`/`ENV`.** `ARG DATABASE_URL` + `RUN` that reads it = the secret is recoverable with `docker history`. Anyone who can pull the image has your database. Secrets are runtime `env_file` only, and `.dockerignore` excludes `.env` so it can't even enter the build context.
 8. **Unbounded container logs.** The default json-file driver grows without limit; a chatty worker fills the EC2 disk in weeks and *everything* falls over. `max-size`/`max-file` logging options on every prod service (§4.5) — set once, forget forever.
 9. **`docker compose down -v` reflexes.** The `-v` flag deletes named volumes — including `redis-data` and every queued-but-unprocessed job. `down` alone is almost always what you meant.
@@ -757,8 +749,8 @@ Run each check; all must pass before doc 14:
 - **Log rotation via logging driver options** (`max-size: 10m`, `max-file: 3`) applied through a YAML anchor so no service can be forgotten — disk-full is the most preventable outage there is.
 - **Healthcheck-gated `depends_on`** everywhere order matters: api waits for Redis to *answer*, nginx waits for api to be *healthy* — eliminating the crash-loop-on-boot race that plain `depends_on` invites.
 - **Prod parity on demand**: `docker-compose.prod.yml` is runnable locally (`config` to validate, or point it at locally-built tags) — the file that runs Mumbai is testable on your laptop, so "compose file typo" is a local failure, not an outage.
-- **Resource limits (`mem_limit`) on every service**, summing comfortably under the EC2 instance's RAM (sized in doc 15) — one leaking process gets OOM-killed and restarted by Docker instead of taking the whole box (and your live calls) down with it.
-- **`stop_grace_period` matched to the workload**: 5m for the api (active calls may finish, doc 01 §11), 60s for the worker (in-flight jobs drain, doc 09/12) — Docker's 10s default would nullify graceful shutdown you carefully built.
+- **Resource limits (`mem_limit`) on every service**, summing comfortably under the EC2 instance's RAM (sized in doc 15) — one leaking process gets OOM-killed and restarted by Docker instead of taking the whole box (and your webhook surface) down with it.
+- **`stop_grace_period` matched to the workload**: 30s for the api (in-flight webhook responses finish, doc 08 budgets), 60s for the worker (in-flight jobs drain, doc 09/12) — Docker's 10s default would nullify graceful shutdown you carefully built.
 
 ---
 
@@ -782,7 +774,7 @@ Container-level posture (deep dive: `18_SECURITY.md`):
 - [ ] `docker/web.Dockerfile` created — standalone output, `NEXT_PUBLIC_*` as build ARGs
 - [ ] `docker-compose.yml` created — redis default, api/worker/web behind `full` profile
 - [ ] `docker-compose.prod.yml` created — nginx-only ports, `internal: true` network, log caps, restart policies
-- [ ] `docker/nginx/nginx.conf` created — WS upgrade block + 3600s timeouts for `/voice/stream`
+- [ ] `docker/nginx/nginx.conf` created — plain HTTPS proxy blocks for `/webhooks/`, `/api/`, and the dashboard
 - [ ] Dev workflow adopted: `docker compose up -d redis` + `npm run dev`
 - [ ] Layer caching witnessed: source-only rebuild finishes in seconds
 - [ ] All seven verification checks (§9) passed — especially the SIGTERM graceful-shutdown test
@@ -795,4 +787,4 @@ Container-level posture (deep dive: `18_SECURITY.md`):
 
 ## 14. Next Step
 
-Proceed to **`14_GITHUB_ACTIONS.md`** — CI/CD for these images: lint/typecheck/test on every PR, multi-stage builds with GitHub Actions layer caching, pushing SHA-tagged images to GHCR, image scanning, and the deploy job that SSHes into the Mumbai EC2 box and rolls `docker-compose.prod.yml` forward with zero dropped calls.
+Proceed to **`14_GITHUB_ACTIONS.md`** — CI/CD for these images: lint/typecheck/test on every PR, multi-stage builds with GitHub Actions layer caching, pushing SHA-tagged images to GHCR, image scanning, and the deploy job that SSHes into the Mumbai EC2 box and rolls `docker-compose.prod.yml` forward gracefully — webhooks answered throughout.
