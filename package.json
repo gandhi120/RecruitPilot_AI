@@ -1,0 +1,20 @@
+{
+  "name": "recruitpilot",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AI Executive Voice Assistant — answers recruiter calls on Varun Gandhi's behalf.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:api": "npm run dev --workspace @recruitpilot/api",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}

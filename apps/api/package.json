@@ -1,0 +1,14 @@
+{
+  "name": "@recruitpilot/api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Fastify backend: voice gateway, agent orchestrator, REST API (docs 09, 12, 16, 17).",
+  "type": "module",
+  "scripts": {
+    "dev": "node --run placeholder",
+    "placeholder": "node -e \"console.log('apps/api: real dev/build/test scripts arrive in Milestone 2 (doc 09).')\""
+  },
+  "dependencies": {
+    "@recruitpilot/shared": "*"
+  }
+}

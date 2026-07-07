@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# RecruitPilot AI — .gitignore
+# This file exists BEFORE any .env is ever created (doc 00 hard rule):
+# once a secret is committed, git history keeps it forever.
+# ---------------------------------------------------------------------------
+
+# Secrets & local environment — the whole point of committing this file first.
+# Ignore every .env variant EXCEPT the documented, value-less template.
+.env
+.env.*
+!.env.example
+*.pem                 # SSH / TLS private keys (doc 15)
+*.key
+**/service-account*.json   # Google service-account keys (doc 16)
+
+# Node
+node_modules/
+npm-debug.log*
+.npm/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Next.js (doc 10)
+apps/web/.next/
+apps/web/out/
+apps/web/next-env.d.ts
+
+# Prisma generated client (doc 11) — generated, never committed
+**/generated/
+apps/api/prisma/generated/
+
+# Test / coverage (doc 19)
+coverage/
+.vitest/
+
+# Logs & runtime
+logs/
+*.log
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Docker / local data volumes (doc 13)
+docker/data/
+redis-data/
