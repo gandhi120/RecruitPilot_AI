@@ -1,0 +1,246 @@
+// prisma/schema.prisma — single source of DB truth (docs 03, 11)
+//
+// Conventions (doc 11 §3.2): camelCase fields mapped to snake_case columns/
+// tables (RLS policies, Realtime and SQL debugging all speak SQL); every table
+// carries timestamptz createdAt/updatedAt; IDs are DB-generated UUIDs.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled :6543 — the app talking (doc 04 §2.4)
+  directUrl = env("DIRECT_URL")   // direct :5432 — the schema changing
+}
+
+// ---------- Enums (doc 11 §2.4: small, code-coupled value sets only) ----------
+
+enum CallDirection {
+  inbound
+  outbound
+}
+
+enum CallStatus {
+  ringing
+  in_progress
+  completed
+  failed
+  dropped
+}
+
+enum TranscriptRole {
+  assistant
+  caller
+  system
+}
+
+enum OpportunityStatus {
+  new
+  reviewing
+  interested
+  declined
+  archived
+}
+
+enum MemoryKind {
+  fact
+  preference
+  history
+}
+
+enum NotificationChannel {
+  email
+  whatsapp
+}
+
+enum NotificationStatus {
+  pending
+  sent
+  failed
+}
+
+// ---------- Recruiter — one row per human, keyed by phone ----------
+
+model Recruiter {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  phone         String   @unique // E.164 (+9198xxxxxxxx) — caller-identification key
+  name          String?
+  email         String?
+  company       String?
+  agency        String?
+  firstCalledAt DateTime @default(now()) @map("first_called_at") @db.Timestamptz(6)
+  lastCalledAt  DateTime @default(now()) @map("last_called_at") @db.Timestamptz(6)
+  callCount     Int      @default(0) @map("call_count") // denormalized (doc 11 §2.1)
+  notes         String?  @db.Text
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  calls         Call[]
+  opportunities Opportunity[]
+  memories      Memory[]
+
+  @@map("recruiters")
+}
+
+// ---------- Call — one row per phone call; executionId is the correlation ID ----------
+
+model Call {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  executionId     String        @unique @map("execution_id") // Bolna execution id — UNIQUE = webhook idempotency (doc 08)
+  recruiterId     String?       @map("recruiter_id") @db.Uuid // null until caller identified
+  direction       CallDirection @default(inbound)
+  status          CallStatus    @default(ringing)
+  startedAt       DateTime      @default(now()) @map("started_at") @db.Timestamptz(6)
+  endedAt         DateTime?     @map("ended_at") @db.Timestamptz(6)
+  durationSeconds Int?          @map("duration_seconds")
+  recordingUrl    String?       @map("recording_url") // Bolna's recording URL (post-call payload) — source only
+  storagePath     String?       @map("storage_path") // OUR Storage key (recordings/<executionId>) — never audio bytes
+  rawPayload      Json?         @map("raw_payload") // verbatim post-call webhook body (doc 08 §3.4 — persist before processing)
+  costBreakdown   Json?         @map("cost_breakdown") // { bolnaMinutes?, bolnaCostUsd?, summaryTokensIn/Out/Cached } — doc 02
+  endedReason     String?       @map("ended_reason") // e.g. caller_hangup, provider_error, max_duration
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  recruiter       Recruiter?        @relation(fields: [recruiterId], references: [id], onDelete: SetNull)
+  transcript      TranscriptEntry[]
+  summary         Summary?
+  opportunities   Opportunity[]
+  memories        Memory[]
+  notifications   Notification[]
+  toolInvocations ToolInvocation[]
+
+  @@index([recruiterId, startedAt(sort: Desc)]) // dashboard: calls per recruiter, newest first
+  @@index([startedAt(sort: Desc)]) // dashboard: global call list
+  @@map("calls")
+}
+
+// ---------- TranscriptEntry — one row per turn (doc 11 §3.1) ----------
+
+model TranscriptEntry {
+  id        String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  callId    String         @map("call_id") @db.Uuid
+  role      TranscriptRole
+  content   String         @db.Text
+  startMs   Int?           @map("start_ms") // offset from call start — only if Bolna's transcript provides it
+  endMs     Int?           @map("end_ms")
+  sequence  Int            // turn order within the call
+  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@unique([callId, sequence]) // ordered fetch + idempotent inserts in one index
+  @@map("transcript_entries")
+}
+
+// ---------- Summary — exactly zero or one per call ----------
+
+model Summary {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  callId      String   @unique @map("call_id") @db.Uuid // UNIQUE = retried job upserts, never duplicates
+  content     String   @db.Text
+  keyPoints   Json?    @map("key_points") // LLM-produced list — Zod-validated at write
+  sentiment   String? // e.g. positive / neutral / negative
+  generatedBy String   @map("generated_by") // exact model id, for auditability
+  tokens      Int?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@map("summaries")
+}
+
+// ---------- Opportunity — the structured outcome Varun triages ----------
+
+model Opportunity {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recruiterId       String            @map("recruiter_id") @db.Uuid
+  callId            String            @map("call_id") @db.Uuid
+  company           String?
+  roleTitle         String?           @map("role_title")
+  techStack         String[]          @map("tech_stack") // tag list, read whole — array OK (doc 11 §2.1)
+  compensationRange String?           @map("compensation_range")
+  location          String?
+  remotePolicy      String?           @map("remote_policy")
+  urgency           String? // free text — recruiters phrase this too variably for an enum
+  nextSteps         String?           @map("next_steps")
+  status            OpportunityStatus @default(new) // Varun triages in the dashboard
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  recruiter Recruiter @relation(fields: [recruiterId], references: [id], onDelete: Cascade)
+  call      Call      @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([status]) // dashboard triage board
+  @@index([recruiterId]) // FK
+  @@index([callId]) // FK
+  @@map("opportunities")
+}
+
+// ---------- Memory — what the assistant remembers per recruiter (doc 00) ----------
+
+model Memory {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recruiterId  String     @map("recruiter_id") @db.Uuid
+  kind         MemoryKind
+  content      String     @db.Text // "Prefers WhatsApp follow-ups", "Called about Staff Eng @ Acme"
+  sourceCallId String?    @map("source_call_id") @db.Uuid // provenance
+  expiresAt    DateTime?  @map("expires_at") @db.Timestamptz(6) // time-bound facts age out
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  recruiter  Recruiter @relation(fields: [recruiterId], references: [id], onDelete: Cascade)
+  sourceCall Call?     @relation(fields: [sourceCallId], references: [id], onDelete: SetNull)
+
+  @@index([recruiterId]) // the identify webhook's memory read (doc 08)
+  @@index([sourceCallId]) // FK
+  @@map("memories")
+}
+
+// ---------- Notification — delivery ledger for notify-varun jobs ----------
+
+model Notification {
+  id        String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  callId    String              @map("call_id") @db.Uuid
+  channel   NotificationChannel
+  status    NotificationStatus  @default(pending)
+  sentAt    DateTime?           @map("sent_at") @db.Timestamptz(6)
+  error     String? // last failure message, for the dashboard + retries
+  createdAt DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId]) // FK
+  @@map("notifications")
+}
+
+// ---------- Setting — config over code (doc 01) ----------
+
+model Setting {
+  key       String   @id // e.g. greeting_text, predefined_questions, feature_flags
+  value     Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("settings")
+}
+
+// ---------- ToolInvocation — audit trail of the agent's tool-webhook calls (docs 08/16) ----------
+
+model ToolInvocation {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  callId     String   @map("call_id") @db.Uuid
+  toolName   String   @map("tool_name") // check_calendar | send_resume | save_recruiter | notify_varun
+  argsJson   Json     @map("args_json")
+  resultJson Json?    @map("result_json")
+  durationMs Int?     @map("duration_ms")
+  sequence   Int      // invocation order within the call
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@unique([callId, sequence])
+  @@map("tool_invocations")
+}

@@ -1,0 +1,45 @@
+# Local development infrastructure (docs 13, 19).
+# App processes (api/worker/web) run natively via `npm run dev` in dev;
+# only the stateful backing services are containerized here.
+#
+#   docker compose up -d          # start redis + postgres
+#   docker compose down           # stop (data survives in named volumes)
+#
+# Postgres here is the LOCAL/TEST database (doc 19) — production data lives in
+# Supabase (doc 04). The init script makes it "Supabase-shaped" (roles +
+# realtime publication) so doc 11's migrations run identically on both.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres # local only — real DB is Supabase (doc 04)
+      POSTGRES_DB: recruitpilot
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d recruitpilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  postgres-data:
